@@ -6,6 +6,10 @@ import "fmt"
 // k=0 returns [origin]
 // k=1 returns origin + 8 immediate neighbours (9 total)
 // k=2 returns origin + 1st ring + 2nd ring, etc.
+// Think of a kernel that expands outwards along each cell edge:
+// k=1 -> 3x3
+// k=2 -> 5x5
+// k=3 -> 7x7
 func KRing[T interface {
 	CellID
 	Cell[T]
