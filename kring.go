@@ -4,7 +4,7 @@ import "fmt"
 
 // KRing returns all cells within k steps of the origin cell (including origin).
 // k=0 returns [origin]
-// k=1 returns origin + 8 immediate neighbors (9 total)
+// k=1 returns origin + 8 immediate neighbours (9 total)
 // k=2 returns origin + 1st ring + 2nd ring, etc.
 func KRing[T interface {
 	CellID
@@ -25,12 +25,12 @@ func KRing[T interface {
 	for step := 0; step < k; step++ {
 		var nextRing []T
 		for _, cell := range currentRing {
-			neighbors, err := Neighbours(cell)
+			neighbours, err := Neighbours(cell)
 			if err != nil {
 				continue
 			}
 
-			for _, n := range neighbors.Slice() {
+			for _, n := range neighbours.Slice() {
 				if !visited[n] {
 					visited[n] = true
 					nextRing = append(nextRing, n)
