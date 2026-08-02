@@ -178,7 +178,7 @@ func TestCompact64_CascadingMultiLevel(t *testing.T) {
 }
 
 func TestCompact128_HighResolution(t *testing.T) {
-	base := "P012345678901234"
+	base := "P012345678601234"
 	children := make([]rhealpix.CellID128, 9)
 	digits := []string{"0", "1", "2", "3", "4", "5", "6", "7", "8"}
 
