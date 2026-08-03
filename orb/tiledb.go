@@ -2,6 +2,7 @@ package rhealpixorb
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/paulmach/orb"
 	rhealpix "github.com/sixy6e/go-rhealpix"
@@ -45,7 +46,7 @@ func BoundingBoxToTileDBRanges(el *rhealpix.Ellipsoid, bound orb.Bound, targetRe
 		if err != nil {
 			return nil, err
 		}
-		return append(r1, r2...), nil
+		return MergeRanges(append(r1, r2...)), nil
 	}
 
 	// extract 4 corners of the bounding box
@@ -91,7 +92,7 @@ func BoundingBoxToTileDBRanges(el *rhealpix.Ellipsoid, bound orb.Bound, targetRe
 		})
 	}
 
-	return ranges, nil
+	return MergeRanges(ranges), nil
 }
 
 // BoundingBoxToTileDBRanges128 translates a WGS84 geographic bounding box
@@ -117,7 +118,7 @@ func BoundingBoxToTileDBRanges128(el *rhealpix.Ellipsoid, bound orb.Bound, targe
 		if err != nil {
 			return nil, err
 		}
-		return append(r1, r2...), nil
+		return MergeRanges128(append(r1, r2...)), nil
 	}
 
 	// extract 4 corners of the bounding box
@@ -165,7 +166,7 @@ func BoundingBoxToTileDBRanges128(el *rhealpix.Ellipsoid, bound orb.Bound, targe
 		})
 	}
 
-	return ranges, nil
+	return MergeRanges128(ranges), nil
 }
 
 // KRingToTileDBRanges calculates the K-Ring neighbours around an origin cell at resolution R
@@ -193,7 +194,7 @@ func KRingToTileDBRanges(originCell rhealpix.CellID64, k int) ([]Uint64Range, er
 		})
 	}
 
-	return ranges, nil
+	return MergeRanges(ranges), nil
 }
 
 // KRingToTileDBRanges128 calculates the K-Ring neighbours around a 128-bit origin cell
@@ -223,5 +224,67 @@ func KRingToTileDBRanges128(originCell rhealpix.CellID128, k int) ([]Uint128Rang
 		})
 	}
 
-	return ranges, nil
+	return MergeRanges128(ranges), nil
+}
+
+// MergeRanges sorts and merges overlapping or contiguous 64-bit uint64 ranges.
+func MergeRanges(ranges []Uint64Range) []Uint64Range {
+	if len(ranges) <= 1 {
+		return ranges
+	}
+
+	// sort ranges by Min bound
+	sort.Slice(ranges, func(i, j int) bool {
+		return ranges[i].Min < ranges[j].Min
+	})
+
+	// merge overlapping or adjacent ranges
+	merged := make([]Uint64Range, 0, len(ranges))
+	merged = append(merged, ranges[0])
+
+	for _, curr := range ranges[1:] {
+		last := &merged[len(merged)-1]
+		if curr.Min <= last.Max+1 { // overlapping or contiguous
+			if curr.Max > last.Max {
+				last.Max = curr.Max
+			}
+		} else {
+			merged = append(merged, curr)
+		}
+	}
+	return merged
+}
+
+// MergeRanges128 sorts and merges overlapping or contiguous 128-bit Uint128Ranges.
+// Compares MinHigh first, then MinLow.
+func MergeRanges128(ranges []Uint128Range) []Uint128Range {
+	if len(ranges) <= 1 {
+		return ranges
+	}
+
+	// sort by High bits first, then Low bits
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].MinHigh == ranges[j].MinHigh {
+			return ranges[i].MinLow < ranges[j].MinLow
+		}
+		return ranges[i].MinHigh < ranges[j].MinHigh
+	})
+
+	// merge overlapping or adjacent 128-bit spans
+	merged := make([]Uint128Range, 0, len(ranges))
+	merged = append(merged, ranges[0])
+
+	for _, curr := range ranges[1:] {
+		last := &merged[len(merged)-1]
+
+		// check if High regions match and Low ranges overlap/touch
+		if curr.MinHigh == last.MaxHigh && curr.MinLow <= last.MaxLow+1 {
+			if curr.MaxLow > last.MaxLow {
+				last.MaxLow = curr.MaxLow
+			}
+		} else {
+			merged = append(merged, curr)
+		}
+	}
+	return merged
 }
