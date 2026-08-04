@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/paulmach/orb"
+	"github.com/paulmach/orb/geojson"
 	rhealpix "github.com/sixy6e/go-rhealpix"
 )
 
@@ -287,4 +288,78 @@ func MergeRanges128(ranges []Uint128Range) []Uint128Range {
 		}
 	}
 	return merged
+}
+
+// STACGeometryToTileDBRanges translates a STAC GeoJSON Geometry (Polygon/MultiPolygon)
+// into a compacted, merged set of 1D TileDB ranges suitable for exact footprint indexing.
+// TODO; update to support both Uint64Range and Uint128Range.
+func STACGeometryToTileDBRanges(
+	el *rhealpix.Ellipsoid,
+	geom geojson.Geometry,
+	targetRes uint8,
+) ([]Uint64Range, error) {
+
+	g := geom.Geometry()
+	if g == nil {
+		return nil, fmt.Errorf("geometry is nil")
+	}
+
+	var rings []orb.Ring
+
+	switch poly := g.(type) {
+	case orb.Polygon:
+		if len(poly) > 0 {
+			rings = append(rings, poly[0]) // outer boundary ring
+		}
+	case orb.MultiPolygon:
+		for _, poly := range poly {
+			if len(poly) > 0 {
+				rings = append(rings, poly[0]) // outer boundary rings
+			}
+		}
+	default:
+		return nil, fmt.Errorf("unsupported geometry type for STAC footprint: %T", geom.Geometry)
+	}
+
+	// cell map to collect all unique covering cell IDs
+	cellMap := make(map[rhealpix.CellID64]bool)
+
+	for _, ring := range rings {
+		// sample 15 dense points along each segment of the polygon footprint
+		sampledPoints := densifyRingEdges(ring, 15)
+
+		// forward project all boundary points to CellID64 at targetRes
+		for _, pt := range sampledPoints {
+			cell, err := rhealpix.ForwardTransform64(el, pt.X(), pt.Y(), targetRes)
+			if err != nil {
+				continue // Skip invalid polar edge spikes if encountered
+			}
+			cellMap[cell] = true
+		}
+	}
+
+	// extract raw cell IDs
+	rawCells := make([]rhealpix.CellID64, 0, len(cellMap))
+	for c := range cellMap {
+		rawCells = append(rawCells, c)
+	}
+
+	// compact the cell set hierarchically (e.g. 9 nonary children -> 1 parent cell)
+	compacted, err := rhealpix.Compact(rawCells)
+	if err != nil {
+		return nil, fmt.Errorf("compaction failed on footprint geometry: %w", err)
+	}
+
+	// convert each compacted cell into a SubtreeRange [Min, Max]
+	ranges := make([]Uint64Range, 0, len(compacted))
+	for _, c := range compacted {
+		minCell, maxCell := c.SubtreeRange()
+		ranges = append(ranges, Uint64Range{
+			Min: uint64(minCell),
+			Max: uint64(maxCell),
+		})
+	}
+
+	// consolidate adjacent or overlapping ranges before returning
+	return MergeRanges(ranges), nil
 }
