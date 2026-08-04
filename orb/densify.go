@@ -74,3 +74,25 @@ func densifyBoundEdges(corners []orb.Point, samplesPerEdge int) []orb.Point {
 	}
 	return pts
 }
+
+// densifyRingEdges interpolates N points along each segment of a polygon ring
+func densifyRingEdges(ring orb.Ring, pointsPerSegment int) []orb.Point {
+	if len(ring) < 2 {
+		return ring
+	}
+
+	densified := make([]orb.Point, 0, len(ring)*pointsPerSegment)
+
+	for i := 0; i < len(ring)-1; i++ {
+		p1 := ring[i]
+		p2 := ring[i+1]
+
+		for j := 0; j < pointsPerSegment; j++ {
+			t := float64(j) / float64(pointsPerSegment)
+			x := p1.X() + t*(p2.X()-p1.X())
+			y := p1.Y() + t*(p2.Y()-p1.Y())
+			densified = append(densified, orb.Point{x, y})
+		}
+	}
+	return densified
+}
