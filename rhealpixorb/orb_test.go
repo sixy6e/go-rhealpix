@@ -5,7 +5,7 @@ import (
 
 	"github.com/paulmach/orb"
 	rhealpix "github.com/sixy6e/go-rhealpix"
-	rhealpixorb "github.com/sixy6e/go-rhealpix/orb"
+	"github.com/sixy6e/go-rhealpix/rhealpixorb"
 )
 
 func TestDeriveRegionCodeSingleRoot(t *testing.T) {
