@@ -63,7 +63,7 @@ func TestSubtreeRange64(t *testing.T) {
 		t.Fatalf("ParseCellID64 unexpected error: %v", err)
 	}
 
-	minBound, maxBound := cell.SubtreeRange()
+	minBound, maxBound := cell.SubtreeRange(0)
 
 	if minBound.Uint64() >= maxBound.Uint64() {
 		t.Errorf("invalid SubtreeRange bounds: min %s >= max %s", minBound.Hex(), maxBound.Hex())
@@ -239,4 +239,66 @@ func TestCompact64_MixedInput(t *testing.T) {
 	if !reflect.DeepEqual(gotSUIDs, wantSUIDs) {
 		t.Errorf("compacted output mismatch: got %v, want %v", gotSUIDs, wantSUIDs)
 	}
+}
+
+// --- Test that Cell Facets (Level-0) pack and unpack correctly (roundtrip) ---
+
+func TestPackCellID64_RootFacets(t *testing.T) {
+	t.Run("pack Level 0 root cells for all facets with nil path", func(t *testing.T) {
+		for facet := uint8(0); facet < 6; facet++ {
+			cellID, err := rhealpix.PackCellID64(facet, 0, nil)
+			if err != nil {
+				t.Fatalf("failed to pack root cell for facet %d: %v", facet, err)
+			}
+
+			if cellID.Facet() != facet {
+				t.Errorf("facet mismatch: got %d, want %d", cellID.Facet(), facet)
+			}
+
+			if cellID.Resolution() != 0 {
+				t.Errorf("resolution mismatch: got %d, want 0", cellID.Resolution())
+			}
+
+			if cellID.IsZero() {
+				t.Errorf("root cell ID for facet %d should not be zero", facet)
+			}
+		}
+	})
+
+	t.Run("pack Level 0 root cells with empty path slice", func(t *testing.T) {
+		for facet := uint8(0); facet < 6; facet++ {
+			cellID, err := rhealpix.PackCellID64(facet, 0, []uint8{})
+			if err != nil {
+				t.Fatalf("failed to pack root cell for facet %d with empty slice: %v", facet, err)
+			}
+
+			if cellID.Facet() != facet {
+				t.Errorf("facet mismatch: got %d, want %d", cellID.Facet(), facet)
+			}
+		}
+	})
+
+	t.Run("reject invalid facet IDs at level 0", func(t *testing.T) {
+		invalidFacets := []uint8{6, 7, 255}
+		for _, facet := range invalidFacets {
+			_, err := rhealpix.PackCellID64(facet, 0, nil)
+			if err == nil {
+				t.Errorf("expected error when packing invalid facet %d, got nil", facet)
+			}
+		}
+	})
+
+	t.Run("unpack facet across deeper resolution paths", func(t *testing.T) {
+		path := []uint8{0, 1, 2, 3, 4, 5, 6, 7, 8} // Level 9 cell
+		for facet := uint8(0); facet < 6; facet++ {
+			cellID, err := rhealpix.PackCellID64(facet, uint8(len(path)), path)
+			if err != nil {
+				t.Fatalf("failed to pack deep cell for facet %d: %v", facet, err)
+			}
+
+			if cellID.Facet() != facet {
+				t.Errorf("facet mismatch at deep res: got %d, want %d", cellID.Facet(), facet)
+			}
+		}
+	})
 }
