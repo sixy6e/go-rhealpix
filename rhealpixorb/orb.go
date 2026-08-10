@@ -94,17 +94,66 @@ func Cell128ToPolygon(el *rhealpix.Ellipsoid, id rhealpix.CellID128, segmentCoun
 }
 
 // Cell64ToBound calculates the orb.Bound envelope for a CellID64 cell.
+// For low resolutions (Level 0..2), it uses densified edges to handle global projection curvature.
+// For deeper resolutions (Level 3+), it directly projects the 4 corner vertices for maximum speed.
 func Cell64ToBound(el *rhealpix.Ellipsoid, id rhealpix.CellID64) (orb.Bound, error) {
-	poly, err := Cell64ToPolygon(el, id, 1)
-	if err != nil {
-		return orb.Bound{}, err
+	if id.IsZero() {
+		return orb.Bound{}, fmt.Errorf("zero cell ID")
 	}
-	return poly.Bound(), nil
+
+	res := id.Resolution()
+
+	// for root/coarse levels, use edge densification to capture curved global boundaries
+	if res <= 2 {
+		poly, err := Cell64ToPolygon(el, id, 8)
+		if err != nil {
+			return orb.Bound{}, err
+		}
+		return poly.Bound(), nil
+	}
+
+	// for deep sub-cells (Level 3+), directly project the 4 planar corners
+	facet := id.Facet()
+	xMin, xMax, yMin, yMax := cellPlanarExtent64(id)
+
+	// local planar corners: UL, UR, LR, LL
+	corners := [4][2]float64{
+		{xMin, yMax},
+		{xMax, yMax},
+		{xMax, yMin},
+		{xMin, yMin},
+	}
+
+	// this might seem counter intuitive, but initialising min to the max value
+	// avoids potential global wrap arounds
+	minX, maxX := 180.0, -180.0
+	minY, maxY := 90.0, -90.0
+
+	for _, pt := range corners {
+		lon, lat := facetLocalToLonLat(el, facet, pt[0], pt[1])
+		if lon < minX {
+			minX = lon
+		}
+		if lon > maxX {
+			maxX = lon
+		}
+		if minY > lat {
+			minY = lat
+		}
+		if maxY < lat {
+			maxY = lat
+		}
+	}
+
+	return orb.Bound{
+		Min: orb.Point{minX, minY},
+		Max: orb.Point{maxX, maxY},
+	}, nil
 }
 
 // Cell128ToBound calculates the orb.Bound envelope for a CellID128 cell.
 func Cell128ToBound(el *rhealpix.Ellipsoid, id rhealpix.CellID128) (orb.Bound, error) {
-	poly, err := Cell128ToPolygon(el, id, 1)
+	poly, err := Cell128ToPolygon(el, id, 8)
 	if err != nil {
 		return orb.Bound{}, err
 	}
