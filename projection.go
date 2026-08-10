@@ -1,6 +1,7 @@
 package rhealpix
 
 import (
+	"fmt"
 	"math"
 )
 
@@ -539,4 +540,24 @@ func FacetLocalToRadians(facet uint8, xLocal, yLocal float64) (xRhp, yRhp float6
 	}
 
 	return xRhp, yRhp
+}
+
+// LonLatToPlanar converts geodetic longitude and latitude (in degrees)
+// for a specific base facet (0..5) into normalised local planar coordinates (xLocal, yLocal in [0, 1])
+// measured from the UpperLeft (NorthWest) corner of the facet.
+func LonLatToPlanar(el *Ellipsoid, facetID uint8, lonDeg, latDeg float64) (xLocal, yLocal float64, err error) {
+	if facetID > 5 {
+		return 0, 0, fmt.Errorf("invalid facet ID %d: must be 0..5", facetID)
+	}
+
+	lonRad := lonDeg * (math.Pi / 180.0)
+	latRad := latDeg * (math.Pi / 180.0)
+
+	// compute authalic latitude
+	beta := el.AuthLat(latRad)
+
+	// obtain facet and local planar coordinates [0, 1] x [0, 1]
+	_, xLoc, yLoc := IdentifyBaseFacet(lonRad, beta)
+
+	return xLoc, yLoc, nil
 }
