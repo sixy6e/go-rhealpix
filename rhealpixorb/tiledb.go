@@ -9,6 +9,9 @@ import (
 	rhealpix "github.com/sixy6e/go-rhealpix"
 )
 
+// Default maxGap parameter to bridge small space-filling curve gaps when querying
+const DefaultQueryMaxGap uint64 = 50000000
+
 // Uint64Range represents a 1D min/max boundary for database queries.
 type Uint64Range struct {
 	Min uint64
@@ -25,10 +28,10 @@ type Uint128Range struct {
 }
 
 // BoundingBoxToTileDBRanges translates a WGS84 geographic bounding box
-// into a set of 1D uint64 ranges suitable for TileDB range-filtering.
+// into a set of 1D uint64 ranges using top down spatial tree decomposition.
 // Safely handles bounding boxes that cross the 180° Antimeridian.
 func BoundingBoxToTileDBRanges(el *rhealpix.Ellipsoid, bound orb.Bound, targetRes uint8) ([]Uint64Range, error) {
-	// handle antimeridian crossing (Min.X > Max.X) by splitting into two bounds
+	// handle antimeridian crossing (Min.X > Max.X) by splitting into two bounds (East and West boxes)
 	if bound.Min.X() > bound.Max.X() {
 		b1 := orb.Bound{
 			Min: orb.Point{bound.Min.X(), bound.Min.Y()},
@@ -47,60 +50,40 @@ func BoundingBoxToTileDBRanges(el *rhealpix.Ellipsoid, bound orb.Bound, targetRe
 		if err != nil {
 			return nil, err
 		}
-		return MergeRanges(append(r1, r2...)), nil
+		return MergeRangesWithGap(append(r1, r2...), DefaultQueryMaxGap), nil
 	}
 
-	// extract 4 corners of the bounding box
-	corners := []orb.Point{
-		bound.Min,
-		{bound.Max.X(), bound.Min.Y()},
-		bound.Max,
-		{bound.Min.X(), bound.Max.Y()},
-	}
+	var ranges []Uint64Range
 
-	// sample dense points along the edges
-	sampledPoints := densifyBoundEdges(corners, 10)
-
-	// forward project all points to CellID64 at targetRes
-	cellMap := make(map[rhealpix.CellID64]bool)
-	for _, pt := range sampledPoints {
-		cell, err := rhealpix.ForwardTransform64(el, pt.X(), pt.Y(), targetRes)
+	// decompose across base facets (0..5)
+	for facet := uint8(0); facet < 6; facet++ {
+		rootCell, err := rhealpix.PackCellID64(facet, 0, nil)
 		if err != nil {
-			return nil, fmt.Errorf("failed forward project (%f, %f): %w", pt.X(), pt.Y(), err)
+			continue
 		}
-		cellMap[cell] = true
+
+		// check base facet envelope first; skip if non-overlapping
+		rootBound, err := Cell64ToBound(el, rootCell)
+		if err == nil && !boundsIntersect(rootBound, bound) {
+			continue
+		}
+
+		decomposeCell(el, rootCell, bound, targetRes, &ranges)
 	}
 
-	// extract slice for compacting
-	rawCells := make([]rhealpix.CellID64, 0, len(cellMap))
-	for c := range cellMap {
-		rawCells = append(rawCells, c)
+	if len(ranges) == 0 {
+		return nil, nil
 	}
 
-	// compact the cell set
-	compacted, err := rhealpix.Compact(rawCells)
-	if err != nil {
-		return nil, fmt.Errorf("compaction failed: %w", err)
-	}
-
-	// convert each compacted cell into a SubtreeRange [Min, Max]
-	ranges := make([]Uint64Range, 0, len(compacted))
-	for _, c := range compacted {
-		minCell, maxCell := c.SubtreeRange()
-		ranges = append(ranges, Uint64Range{
-			Min: uint64(minCell),
-			Max: uint64(maxCell),
-		})
-	}
-
-	return MergeRanges(ranges), nil
+	// consolidate adjacent or near-adjacent intervals
+	return MergeRangesWithGap(ranges, DefaultQueryMaxGap), nil
 }
 
 // BoundingBoxToTileDBRanges128 translates a WGS84 geographic bounding box
 // into a set of 128-bit compound ranges suitable for high-resolution TileDB queries.
 // Safely handles bounding boxes that cross the 180° Antimeridian.
 func BoundingBoxToTileDBRanges128(el *rhealpix.Ellipsoid, bound orb.Bound, targetRes uint8) ([]Uint128Range, error) {
-	// handle antimeridian crossing (Min.X > Max.X) by splitting into two bounds
+	// handle antimeridian crossing (Min.X > Max.X) by splitting into two bounds (East and West boxes)
 	if bound.Min.X() > bound.Max.X() {
 		b1 := orb.Bound{
 			Min: orb.Point{bound.Min.X(), bound.Min.Y()},
@@ -152,12 +135,13 @@ func BoundingBoxToTileDBRanges128(el *rhealpix.Ellipsoid, bound orb.Bound, targe
 	// compact the cell set using generic Compact[CellID128]
 	compacted, err := rhealpix.Compact(rawCells)
 	if err != nil {
-		return nil, fmt.Errorf("compaction failed: %w", err)
+		compacted = rawCells
 	}
 
 	// convert each compacted cell into a 128-bit SubtreeRange [Min, Max]
 	ranges := make([]Uint128Range, 0, len(compacted))
 	for _, c := range compacted {
+		// minCell, maxCell := c.SubtreeRange(targetRes)
 		minCell, maxCell := c.SubtreeRange()
 		ranges = append(ranges, Uint128Range{
 			MinHigh: minCell.High,
@@ -186,16 +170,17 @@ func KRingToTileDBRanges(originCell rhealpix.CellID64, k int) ([]Uint64Range, er
 	}
 
 	// convert each cell to SubtreeRange [Min, Max]
+	targetRes := originCell.Resolution()
 	ranges := make([]Uint64Range, 0, len(compacted))
 	for _, c := range compacted {
-		minCell, maxCell := c.SubtreeRange()
+		minCell, maxCell := c.SubtreeRange(targetRes)
 		ranges = append(ranges, Uint64Range{
 			Min: uint64(minCell),
 			Max: uint64(maxCell),
 		})
 	}
 
-	return MergeRanges(ranges), nil
+	return MergeRangesWithGap(ranges, DefaultQueryMaxGap), nil
 }
 
 // KRingToTileDBRanges128 calculates the K-Ring neighbours around a 128-bit origin cell
@@ -214,8 +199,10 @@ func KRingToTileDBRanges128(originCell rhealpix.CellID128, k int) ([]Uint128Rang
 	}
 
 	// convert each cell to 128-bit SubtreeRange [Min, Max]
+	// targetRes := originCell.Resolution()
 	ranges := make([]Uint128Range, 0, len(compacted))
 	for _, c := range compacted {
+		// minCell, maxCell := c.SubtreeRange(targetRes)
 		minCell, maxCell := c.SubtreeRange()
 		ranges = append(ranges, Uint128Range{
 			MinHigh: minCell.High,
@@ -228,8 +215,14 @@ func KRingToTileDBRanges128(originCell rhealpix.CellID128, k int) ([]Uint128Rang
 	return MergeRanges128(ranges), nil
 }
 
-// MergeRanges sorts and merges overlapping or contiguous 64-bit uint64 ranges.
+// MergeRanges sorts and merges strictly overlapping or contiguous 64-bit uint64 ranges (maxGap = 1).
 func MergeRanges(ranges []Uint64Range) []Uint64Range {
+	return MergeRangesWithGap(ranges, 1)
+}
+
+// MergeRangesWithGap sorts and merges overlapping or near-adjacent Uint64Ranges.
+// If the gap between range[i].Max and range[i+1].Min is <= maxGap, they are combined.
+func MergeRangesWithGap(ranges []Uint64Range, maxGap uint64) []Uint64Range {
 	if len(ranges) <= 1 {
 		return ranges
 	}
@@ -241,23 +234,26 @@ func MergeRanges(ranges []Uint64Range) []Uint64Range {
 
 	// merge overlapping or adjacent ranges
 	merged := make([]Uint64Range, 0, len(ranges))
-	merged = append(merged, ranges[0])
+	current := ranges[0]
 
-	for _, curr := range ranges[1:] {
-		last := &merged[len(merged)-1]
-		if curr.Min <= last.Max+1 { // overlapping or contiguous
-			if curr.Max > last.Max {
-				last.Max = curr.Max
+	for i := 1; i < len(ranges); i++ {
+		next := ranges[i]
+
+		if next.Min <= current.Max+maxGap {
+			if next.Max > current.Max {
+				current.Max = next.Max
 			}
 		} else {
-			merged = append(merged, curr)
+			merged = append(merged, current)
+			current = next
 		}
 	}
+
+	merged = append(merged, current)
 	return merged
 }
 
 // MergeRanges128 sorts and merges overlapping or contiguous 128-bit Uint128Ranges.
-// Compares MinHigh first, then MinLow.
 func MergeRanges128(ranges []Uint128Range) []Uint128Range {
 	if len(ranges) <= 1 {
 		return ranges
@@ -290,8 +286,9 @@ func MergeRanges128(ranges []Uint128Range) []Uint128Range {
 	return merged
 }
 
-// STACGeometryToTileDBRanges translates a STAC GeoJSON Geometry (Polygon/MultiPolygon)
-// into a compacted, merged set of 1D TileDB ranges suitable for exact footprint indexing.
+// STACGeometryToTileDBRanges translates a STAC GeoJSON Geometry into a solid,
+// hierarchically compacted set of 1D TileDB ranges using top down planar decomposition.
+// The approach of top down planar decomposition and compaction, is similar to Uber's H3 PolyFill.
 // TODO; update to support both Uint64Range and Uint128Range.
 func STACGeometryToTileDBRanges(
 	el *rhealpix.Ellipsoid,
@@ -304,62 +301,26 @@ func STACGeometryToTileDBRanges(
 		return nil, fmt.Errorf("geometry is nil")
 	}
 
-	var rings []orb.Ring
-
-	switch poly := g.(type) {
-	case orb.Polygon:
-		if len(poly) > 0 {
-			rings = append(rings, poly[0]) // outer boundary ring
-		}
-	case orb.MultiPolygon:
-		for _, poly := range poly {
-			if len(poly) > 0 {
-				rings = append(rings, poly[0]) // outer boundary rings
-			}
-		}
-	default:
-		return nil, fmt.Errorf("unsupported geometry type for STAC footprint: %T", geom.Geometry)
-	}
-
-	// cell map to collect all unique covering cell IDs
-	cellMap := make(map[rhealpix.CellID64]bool)
-
-	for _, ring := range rings {
-		// sample 15 dense points along each segment of the polygon footprint
-		sampledPoints := densifyRingEdges(ring, 15)
-
-		// forward project all boundary points to CellID64 at targetRes
-		for _, pt := range sampledPoints {
-			cell, err := rhealpix.ForwardTransform64(el, pt.X(), pt.Y(), targetRes)
-			if err != nil {
-				continue // Skip invalid polar edge spikes if encountered
-			}
-			cellMap[cell] = true
-		}
-	}
-
-	// extract raw cell IDs
-	rawCells := make([]rhealpix.CellID64, 0, len(cellMap))
-	for c := range cellMap {
-		rawCells = append(rawCells, c)
-	}
-
-	// compact the cell set hierarchically (e.g. 9 nonary children -> 1 parent cell)
-	compacted, err := rhealpix.Compact(rawCells)
+	// run top down planar decomposition and compaction
+	compactedCells, err := STACGeometryToTileDBRangesTopDown(el, g, targetRes)
 	if err != nil {
-		return nil, fmt.Errorf("compaction failed on footprint geometry: %w", err)
+		return nil, fmt.Errorf("failed top down geometry decomposition: %w", err)
 	}
 
-	// convert each compacted cell into a SubtreeRange [Min, Max]
-	ranges := make([]Uint64Range, 0, len(compacted))
-	for _, c := range compacted {
-		minCell, maxCell := c.SubtreeRange()
+	if len(compactedCells) == 0 {
+		return nil, nil
+	}
+
+	// convert compacted CellID64 elements into 1D Uint64Ranges
+	ranges := make([]Uint64Range, 0, len(compactedCells))
+	for _, c := range compactedCells {
+		minCell, maxCell := c.SubtreeRangeMax()
 		ranges = append(ranges, Uint64Range{
 			Min: uint64(minCell),
 			Max: uint64(maxCell),
 		})
 	}
 
-	// consolidate adjacent or overlapping ranges before returning
-	return MergeRanges(ranges), nil
+	// consolidate adjacent and near adjacent 1D ranges using DefaultQueryMaxGap
+	return MergeRangesWithGap(ranges, DefaultQueryMaxGap), nil
 }
