@@ -7,24 +7,36 @@ const MaxResolution128 uint8 = 30
 // CellID128 represents a 128-bit bit-packed rHEALPix cell identifier.
 // Supports resolution levels 0 through 30 (~sub-millimeter global accuracy).
 //
-// Layout:
-//   - High: [Facet: 3b] [Res: 5b] [Levels 1..14 Sub-cells: 56b (14 x 4b)]
-//   - Low:  [Levels 15..30 Sub-cells: 64b (16 x 4b)]
+// ============================================================================
+// GLOBAL 128-BIT LAYOUT (MSB to LSB across 128 bits):
+// ============================================================================
 //
-// HIGH WORD (64 bits):
+//	High Word (Bits 64..127):
+//	  - Bits 125..127 (3 bits)  : Base Facet (0..5)
+//	  - Bits 120..124 (5 bits)  : Resolution Depth (0..30)
+//	  - Bits 64..119  (56 bits) : Levels 1..14 Sub-cells (14 x 4-bit nibbles: 0..8)
+//	Low Word (Bits 0..63):
+//	  - Bits 0..63    (64 bits) : Levels 15..30 Sub-cells (16 x 4-bit nibbles: 0..8)
 //
-//	[ 63..61 ] Facet ID (Base Level 0)
-//	[ 60..57 ] Padding
-//	[ 56..53 ] Resolution Depth (R = 0..30)
-//	[ 52..49 ] Level 1 Path Digit  (0..8)
-//	[ 48..45 ] Level 2 Path Digit  (0..8)
-//	  ...
-//	[  3..0  ] Level 14 Path Digit (0..8)  <-- End of High Word
+// ============================================================================
+// WORD-RELATIVE BIT OFFSETS:
+// ============================================================================
+//
+//	HIGH WORD (64 bits):
+//	  [ 63..61 ] Facet ID (0..5, 3 bits)
+//	  [ 60..56 ] Resolution Depth (R = 0..30, 5 bits)
+//	  [ 55..52 ] Level 1 Path Digit (0..8, 4 bits)
+//	  [ 51..48 ] Level 2 Path Digit (0..8, 4 bits)
+//	    ...
+//	  [  3..0  ] Level 14 Path Digit (0..8, 4 bits)
 //
 //	LOW WORD (64 bits):
-//	[ 60..57 ] Level 15 Path Digit (0..8)
-//	  ...
-//	[  0     ] Level 30 Path Digit
+//	  [ 63..60 ] Level 15 Path Digit (0..8, 4 bits)
+//	  [ 59..56 ] Level 16 Path Digit (0..8, 4 bits)
+//	    ...
+//	  [  3..0  ] Level 30 Path Digit (0..8, 4 bits)
+//
+// ============================================================================
 type CellID128 struct {
 	High uint64
 	Low  uint64
@@ -48,11 +60,9 @@ func PackCellID128(facet uint8, res uint8, path []uint8) (CellID128, error) {
 		nibble := uint64(subCell) & SubCellMask
 
 		if i < 14 {
-			// levels 1..14 go into High word (bits 52 down to 0)
 			shift := 52 - (i * 4)
 			high |= nibble << shift
 		} else {
-			// levels 15..30 go into Low word (bits 60 down to 0)
 			shift := 60 - ((i - 14) * 4)
 			low |= nibble << shift
 		}
@@ -73,7 +83,42 @@ func (id CellID128) Resolution() uint8 {
 
 // IsZero returns true if the cell ID is uninitialised.
 func (id CellID128) IsZero() bool {
-	return id.High == 0 && id.Low == 0
+	return id.Facet() > 5 || id.Resolution() > MaxResolution128
+}
+
+// SubtreeRange calculates the [Min, Max] 128-bit integer range enclosing ALL child cells
+// down to targetRes. Essential for direct TileDB, RocksDB, or B-Tree 1D spatial range queries.
+// If the cell is already at or below targetRes, Min and Max are identical [id, id].
+func (id CellID128) SubtreeRange(targetRes uint8) (CellID128, CellID128) {
+	res := id.Resolution()
+
+	// If already a leaf at or below targetRes (or absolute MaxResolution128), return exact single key
+	if res >= targetRes || res >= MaxResolution128 {
+		return id, id
+	}
+
+	minBound := id
+	maxBound := id
+
+	// Fill trailing 4-bit nibbles from current 'res' up to 'targetRes-1' with max sub-cell digit 8
+	for r := res; r < targetRes; r++ {
+		if r < 14 {
+			// Levels 1..14 affect High word (bits 52 down to 0)
+			s := 52 - (r * 4)
+			maxBound.High |= (uint64(8) << s)
+		} else {
+			// Levels 15..30 affect Low word (bits 60 down to 0)
+			s := 60 - ((r - 14) * 4)
+			maxBound.Low |= (uint64(8) << s)
+		}
+	}
+
+	return minBound, maxBound
+}
+
+// SubtreeRangeMax calculates the [Min, Max] range down to absolute MaxResolution128.
+func (id CellID128) SubtreeRangeMax() (CellID128, CellID128) {
+	return id.SubtreeRange(MaxResolution128)
 }
 
 // Equal checks if two 128-bit cell IDs are identical.
@@ -81,48 +126,7 @@ func (id CellID128) Equal(other CellID128) bool {
 	return id.High == other.High && id.Low == other.Low
 }
 
-// SubtreeRange calculates the [Min, Max] 128-bit key range enclosing ALL child cells.
-// Works seamlessly across compound (High, Low) database dimensions or fixed 16-byte slices.
-func (id CellID128) SubtreeRange() (CellID128, CellID128) {
-	res := id.Resolution()
-	minBound := id
-
-	if res == MaxResolution128 {
-		return id, id
-	}
-
-	var maxHigh, maxLow uint64
-
-	// update resolution in High word to MaxResolution128 (30)
-	facetBits := (uint64(id.Facet()) & FacetMask) << FacetShift
-	maxResBits := (uint64(MaxResolution128) & ResMask) << ResShift
-
-	if res <= 14 {
-		// target cell is coarse (Res <= 14). Unused bits span remaining High nibbles and ALL of Low.
-		unusedHighBits := (14 - res) * 4
-		highMask := (uint64(1) << unusedHighBits) - 1
-
-		existingHighPath := id.High & 0x00FFFFFFFFFFFFFF
-		maxHigh = facetBits | maxResBits | existingHighPath | highMask
-		maxLow = ^uint64(0) // fill Low completely (0xFFFFFFFFFFFFFFFF)
-	} else {
-		// high word path is fixed; set max res header and fill remaining unused bits in Low word
-		existingHighPath := id.High & 0x00FFFFFFFFFFFFFF
-		maxHigh = facetBits | maxResBits | existingHighPath
-
-		unusedLowBits := (30 - res) * 4
-		if unusedLowBits > 0 {
-			lowMask := (uint64(1) << unusedLowBits) - 1
-			maxLow = id.Low | lowMask
-		} else {
-			maxLow = id.Low
-		}
-	}
-
-	return minBound, CellID128{High: maxHigh, Low: maxLow}
-}
-
-// Parent returns the parent cell at targetLevel by masking out lower-level nibbles.
+// Parent returns the parent cell at targetLevel by masking out lower level nibbles.
 func (id CellID128) Parent(targetLevel uint8) (CellID128, error) {
 	curRes := id.Resolution()
 	if targetLevel > curRes {
@@ -132,35 +136,33 @@ func (id CellID128) Parent(targetLevel uint8) (CellID128, error) {
 		return id, nil
 	}
 
+	parent := CellID128{}
+
+	// reconstruct high word Header (facet + new target resolution)
+	facetBits := (uint64(id.Facet()) & FacetMask) << FacetShift
+	resBits := (uint64(targetLevel) & ResMask) << ResShift
+	parent.High = facetBits | resBits
+
+	// mask path nibbles based on target Level
 	if targetLevel <= 14 {
-		// target level is completely within the High word.
-		// low word becomes 0 because no digits remain at depth > 14.
-		shift := (14 - targetLevel) * 4
-		mask := uint64(0xFFFFFFFFFFFFFFFF) << shift
+		// target parent resides entirely within high word (levels 1..14)
+		// low word becomes completely zeroed out
+		if targetLevel > 0 {
+			shift := (14 - targetLevel) * 4
+			mask := ^uint64(0) << shift
+			parent.High |= (id.High & 0x00FFFFFFFFFFFFFF) & mask
+		}
+		// parent.Low remains 0
+	} else {
+		// target parent includes all 14 high levels, plus a subset of low levels (levels 15..30)
+		parent.High |= (id.High & 0x00FFFFFFFFFFFFFF)
 
-		facetBits := (uint64(id.Facet()) & FacetMask) << FacetShift
-		resBits := (uint64(targetLevel) & ResMask) << ResShift
-		pathBits := (id.High & mask) & 0x00FFFFFFFFFFFFFF
-
-		return CellID128{
-			High: facetBits | resBits | pathBits,
-			Low:  0,
-		}, nil
+		shift := (30 - targetLevel) * 4
+		mask := ^uint64(0) << shift
+		parent.Low = id.Low & mask
 	}
 
-	// target level > 14: High word is fully preserved (except resolution header bits),
-	// and Low word has its tail nibbles masked out.
-	shift := (30 - targetLevel) * 4
-	mask := uint64(0xFFFFFFFFFFFFFFFF) << shift
-
-	// update resolution in High word
-	resBits := (uint64(targetLevel) & ResMask) << ResShift
-	highBits := (id.High &^ (uint64(ResMask) << ResShift)) | resBits
-
-	return CellID128{
-		High: highBits,
-		Low:  id.Low & mask,
-	}, nil
+	return parent, nil
 }
 
 // CommonAncestor128 calculates the lowest common ancestor (LCA) between two 128-bit cells.
@@ -175,13 +177,36 @@ func CommonAncestor128(a, b CellID128) (CellID128, error) {
 	}
 
 	lcaLevel := uint8(0)
-	for lvl := uint8(1); lvl <= minRes; lvl++ {
-		pA, _ := a.Parent(lvl)
-		pB, _ := b.Parent(lvl)
-		if !pA.Equal(pB) {
-			break
+
+	// compare levels 1..14 in high word (bits 55..0)
+	highDiff := (a.High ^ b.High) & 0x00FFFFFFFFFFFFFF
+	if highDiff == 0 {
+		// all high levels match! LCA is at least level 14.
+		lcaLevel = 14
+		if lcaLevel > minRes {
+			lcaLevel = minRes
 		}
-		lcaLevel = lvl
+
+		// if minRes extends into low word (levels 15..30), check low word
+		if minRes > 14 {
+			lowDiff := a.Low ^ b.Low
+			for lvl := uint8(15); lvl <= minRes; lvl++ {
+				shift := (30 - lvl) * 4
+				if (lowDiff >> shift) != 0 {
+					break
+				}
+				lcaLevel = lvl
+			}
+		}
+	} else {
+		// divergence happens in high word (levels 1..14)
+		for lvl := uint8(1); lvl <= minRes && lvl <= 14; lvl++ {
+			shift := (14 - lvl) * 4
+			if (highDiff >> shift) != 0 {
+				break
+			}
+			lcaLevel = lvl
+		}
 	}
 
 	return a.Parent(lcaLevel)
@@ -241,14 +266,14 @@ func DecodeCellID128(cellID CellID128) (facet uint8, res uint8, path []uint8, er
 		return 0, 0, nil, ErrInvalidCellID
 	}
 
-	// extract Facet (Top 3 bits of High uint64: bits 61-63)
+	// extract Facet (Top 3 bits of High word: bits 61..63)
 	facet = uint8((cellID.High >> FacetShift) & FacetMask)
 	if facet > 5 {
 		return 0, 0, nil, ErrInvalidCellID
 	}
 
-	// extract Resolution (next 6 bits of High uint64: bits 55-60)
-	res = uint8((cellID.High >> 55) & 0x3F)
+	// extract Resolution (5 bits of High uint64: bits 56..60)
+	res = uint8((cellID.High >> ResShift) & ResMask)
 	if res > MaxResolution128 {
 		return 0, 0, nil, ErrResolutionExceeded
 	}
@@ -278,4 +303,48 @@ func DecodeCellID128(cellID CellID128) (facet uint8, res uint8, path []uint8, er
 // UnpackCellID128 is an alias for DecodeCellID128.
 func UnpackCellID128(cellID CellID128) (facet uint8, res uint8, path []uint8, err error) {
 	return DecodeCellID128(cellID)
+}
+
+// Child returns the nth child cell (0..8) at the next resolution level (res + 1).
+// Operates purely bitwise without allocating slices.
+func (id CellID128) Child(subCellIdx uint8) (CellID128, error) {
+	if subCellIdx > 8 {
+		return CellID128{}, fmt.Errorf("invalid sub-cell index %d: must be 0..8", subCellIdx)
+	}
+
+	res := id.Resolution()
+	if res >= MaxResolution128 {
+		return CellID128{}, fmt.Errorf("cannot derive child beyond max resolution %d", MaxResolution128)
+	}
+
+	nextRes := res + 1
+
+	child := CellID128{
+		High: id.High,
+		Low:  id.Low,
+	}
+
+	// update resolution header in high word
+	facetBits := (uint64(id.Facet()) & FacetMask) << FacetShift
+	resBits := (uint64(nextRes) & ResMask) << ResShift
+	child.High = (child.High & 0xE000000000000000) | facetBits | resBits
+
+	// insert new 4-bit nibble at current level `res`
+	nibble := (uint64(subCellIdx) & SubCellMask)
+
+	if res < 14 {
+		// level falls in high word (levels 1..14)
+		// level 1 (res=0) -> shift 52 (bits 55..52)
+		// level 14 (res=13) -> shift 0 (bits 3..0)
+		shift := 52 - (res * 4)
+		child.High |= (nibble << shift)
+	} else {
+		// level falls in Low word (levels 15..30)
+		// level 15 (res=14) -> shift 60 (bits 63..60)
+		// level 30 (res=29) -> shift 0 (bits 3..0)
+		shift := 60 - ((res - 14) * 4)
+		child.Low |= (nibble << shift)
+	}
+
+	return child, nil
 }
