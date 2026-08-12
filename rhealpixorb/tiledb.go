@@ -27,6 +27,26 @@ type Uint128Range struct {
 	MaxLow  uint64
 }
 
+// NewUint128Range constructs a Uint128Range directly from Min and Max CellID128 values.
+func NewUint128Range(minCell, maxCell rhealpix.CellID128) Uint128Range {
+	return Uint128Range{
+		MinHigh: minCell.High,
+		MinLow:  minCell.Low,
+		MaxHigh: maxCell.High,
+		MaxLow:  maxCell.Low,
+	}
+}
+
+// MinCell returns the lower bound as a native CellID128.
+func (r Uint128Range) MinCell() rhealpix.CellID128 {
+	return rhealpix.CellID128{High: r.MinHigh, Low: r.MinLow}
+}
+
+// MaxCell returns the upper bound as a native CellID128.
+func (r Uint128Range) MaxCell() rhealpix.CellID128 {
+	return rhealpix.CellID128{High: r.MaxHigh, Low: r.MaxLow}
+}
+
 // BoundingBoxToTileDBRanges translates a WGS84 geographic bounding box
 // into a set of 1D uint64 ranges using top down spatial tree decomposition.
 // Safely handles bounding boxes that cross the 180° Antimeridian.
