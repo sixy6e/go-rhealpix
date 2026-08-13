@@ -227,31 +227,24 @@ func DeriveRegionCode64FromGeometry(el *rhealpix.Ellipsoid, geom orb.Geometry, t
 		return "", nil, err
 	}
 
-	facetGroups := make(map[uint8][]orb.Point)
+	facetGroups := make(map[uint8][]rhealpix.CellID64)
 	for _, pt := range vertices {
 		cell, err := rhealpix.ForwardTransform64(el, pt.X(), pt.Y(), targetRes)
 		if err != nil {
 			return "", nil, err
 		}
-		facetGroups[cell.Facet()] = append(facetGroups[cell.Facet()], pt)
+		facetGroups[cell.Facet()] = append(facetGroups[cell.Facet()], cell)
 	}
 
 	var suids []string
-	for _, groupPts := range facetGroups {
+	for _, groupCells := range facetGroups {
 		var lcaCell rhealpix.CellID64
-		for i, p := range groupPts {
-			cell, err := rhealpix.ForwardTransform64(el, p.X(), p.Y(), targetRes)
-			if err != nil {
-				return "", nil, err
-			}
-			if i == 0 {
+		lcaCell = groupCells[0]
+		for _, cell := range groupCells[1:] {
+			var lcaErr error
+			lcaCell, lcaErr = rhealpix.CommonAncestor64(lcaCell, cell)
+			if lcaErr != nil {
 				lcaCell = cell
-			} else {
-				var lcaErr error
-				lcaCell, lcaErr = rhealpix.CommonAncestor64(lcaCell, cell)
-				if lcaErr != nil {
-					lcaCell = cell
-				}
 			}
 		}
 		suids = append(suids, lcaCell.String())
@@ -268,31 +261,24 @@ func DeriveRegionCode128FromGeometry(el *rhealpix.Ellipsoid, geom orb.Geometry, 
 		return "", nil, err
 	}
 
-	facetGroups := make(map[uint8][]orb.Point)
+	facetGroups := make(map[uint8][]rhealpix.CellID128)
 	for _, pt := range vertices {
 		cell, err := rhealpix.ForwardTransform128(el, pt.X(), pt.Y(), targetRes)
 		if err != nil {
 			return "", nil, err
 		}
-		facetGroups[cell.Facet()] = append(facetGroups[cell.Facet()], pt)
+		facetGroups[cell.Facet()] = append(facetGroups[cell.Facet()], cell)
 	}
 
 	var suids []string
-	for _, groupPts := range facetGroups {
+	for _, groupCells := range facetGroups {
 		var lcaCell rhealpix.CellID128
-		for i, p := range groupPts {
-			cell, err := rhealpix.ForwardTransform128(el, p.X(), p.Y(), targetRes)
-			if err != nil {
-				return "", nil, err
-			}
-			if i == 0 {
+		lcaCell = groupCells[0]
+		for _, cell := range groupCells[1:] {
+			var lcaErr error
+			lcaCell, lcaErr = rhealpix.CommonAncestor128(lcaCell, cell)
+			if lcaErr != nil {
 				lcaCell = cell
-			} else {
-				var lcaErr error
-				lcaCell, lcaErr = rhealpix.CommonAncestor128(lcaCell, cell)
-				if lcaErr != nil {
-					lcaCell = cell
-				}
 			}
 		}
 		suids = append(suids, lcaCell.String())
