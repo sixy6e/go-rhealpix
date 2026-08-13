@@ -110,6 +110,11 @@ func CellShape64(id CellID64) CellShape {
 		if digit%2 != 0 {
 			isDart = false
 		}
+
+		// early exit; once it's neither a cap nor a dart cell, it's guaranteed to be skew quad
+		if !isCap && !isDart {
+			return ShapeSkewQuad
+		}
 	}
 
 	if isCap {
@@ -151,6 +156,11 @@ func CellShape128(id CellID128) CellShape {
 		}
 		if digit%2 != 0 {
 			isDart = false
+		}
+
+		// early exit; once it's neither a cap nor a dart cell, it's guaranteed to be skew quad
+		if !isCap && !isDart {
+			return ShapeSkewQuad
 		}
 	}
 
