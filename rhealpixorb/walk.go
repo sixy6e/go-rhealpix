@@ -414,3 +414,94 @@ func STACGeometryToTileDBRangesTopDown(
 
 	return compacted, nil
 }
+
+// WalkPlanarCell128 recursively walks the rHEALPix nonary tree in local planar space using 128-bit cell IDs.
+// Similar methodology to Uber's H3 PolyFill. But simpler as we have squares, not overlapping
+// hexagons and pentagons.
+// TODO; test dart shaped cells.
+func WalkPlanarCell128(
+	cell rhealpix.CellID128,
+	box PlanarBox,
+	prep PreparedGeometry,
+	targetRes uint8,
+	results []rhealpix.CellID128,
+) []rhealpix.CellID128 {
+	relation := EvaluateBoxRelation(box, prep)
+
+	switch relation {
+	case BoxOutside:
+		return results
+
+	case BoxInside:
+		return append(results, cell)
+
+	case BoxStraddles:
+		if cell.Resolution() >= targetRes {
+			return append(results, cell)
+		}
+
+		childBoxes := box.Subdivide3x3()
+
+		for i := uint8(0); i < 9; i++ {
+			childCell, err := cell.Child(i)
+			if err != nil {
+				continue
+			}
+
+			results = WalkPlanarCell128(childCell, childBoxes[i], prep, targetRes, results)
+		}
+	}
+
+	return results
+}
+
+// STACGeometryToTileDBRangesTopDown128 performs top-down nonary tree spatial decomposition
+// of a WGS84 geometry into a compacted set of 128-bit rHEALPix cell IDs up to targetRes.
+//
+// It clips the input geometry across rHEALPix ellipsoid facets, projects each facet
+// sub-geometry into normalised [0, 1] x [0, 1] local planar space, and constructs a
+// PreparedGeometry for zero-allocation point-in-polygon and Liang-Barsky edge checks.
+// https://en.wikipedia.org/wiki/Liang%E2%80%93Barsky_algorithm
+// https://www.geeksforgeeks.org/computer-graphics/liang-barsky-algorithm/
+//
+// The resulting cells are compacted (merging nine full child cells into their
+// parent cell recursively) to minimise the final range footprint before 1D database
+// indexing in TileDB.
+// The approach of top down planar decomposition and compaction, is similar to Uber's H3 PolyFill.
+func STACGeometryToTileDBRangesTopDown128(
+	el *rhealpix.Ellipsoid,
+	geom orb.Geometry,
+	targetRes uint8,
+) ([]rhealpix.CellID128, error) {
+	facetSubGeoms, err := ClipGeometryToFacets(el, geom)
+	if err != nil {
+		return nil, fmt.Errorf("failed clipping geometry to facets: %w", err)
+	}
+
+	// pre-allocate rawCells slice capacity (128 entries) to avoid dynamic growth allocations
+	rawCells := make([]rhealpix.CellID128, 0, 128)
+
+	rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
+
+	for _, sub := range facetSubGeoms {
+		rootCell, err := rhealpix.PackCellID128(sub.FacetID, 0, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		planarPoly := projectGeometryToPlanar(el, sub.FacetID, sub.Geometry)
+		if planarPoly == nil {
+			continue
+		}
+
+		prep := NewPreparedGeometry(planarPoly)
+		rawCells = WalkPlanarCell128(rootCell, rootBox, prep, targetRes, rawCells)
+	}
+
+	compacted, err := rhealpix.Compact(rawCells)
+	if err != nil {
+		return nil, fmt.Errorf("failed compacting decomposed cells: %w", err)
+	}
+
+	return compacted, nil
+}

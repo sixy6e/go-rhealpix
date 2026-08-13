@@ -161,14 +161,8 @@ func BoundingBoxToTileDBRanges128(el *rhealpix.Ellipsoid, bound orb.Bound, targe
 	// convert each compacted cell into a 128-bit SubtreeRange [Min, Max]
 	ranges := make([]Uint128Range, 0, len(compacted))
 	for _, c := range compacted {
-		// minCell, maxCell := c.SubtreeRange(targetRes)
-		minCell, maxCell := c.SubtreeRange()
-		ranges = append(ranges, Uint128Range{
-			MinHigh: minCell.High,
-			MinLow:  minCell.Low,
-			MaxHigh: maxCell.High,
-			MaxLow:  maxCell.Low,
-		})
+		minCell, maxCell := c.SubtreeRange(targetRes)
+		ranges = append(ranges, NewUint128Range(minCell, maxCell))
 	}
 
 	return MergeRanges128(ranges), nil
@@ -219,17 +213,11 @@ func KRingToTileDBRanges128(originCell rhealpix.CellID128, k int) ([]Uint128Rang
 	}
 
 	// convert each cell to 128-bit SubtreeRange [Min, Max]
-	// targetRes := originCell.Resolution()
+	targetRes := originCell.Resolution()
 	ranges := make([]Uint128Range, 0, len(compacted))
 	for _, c := range compacted {
-		// minCell, maxCell := c.SubtreeRange(targetRes)
-		minCell, maxCell := c.SubtreeRange()
-		ranges = append(ranges, Uint128Range{
-			MinHigh: minCell.High,
-			MinLow:  minCell.Low,
-			MaxHigh: maxCell.High,
-			MaxLow:  maxCell.Low,
-		})
+		minCell, maxCell := c.SubtreeRange(targetRes)
+		ranges = append(ranges, NewUint128Range(minCell, maxCell))
 	}
 
 	return MergeRanges128(ranges), nil
@@ -273,36 +261,74 @@ func MergeRangesWithGap(ranges []Uint64Range, maxGap uint64) []Uint64Range {
 	return merged
 }
 
-// MergeRanges128 sorts and merges overlapping or contiguous 128-bit Uint128Ranges.
+// compare128 returns -1 if a < b, 0 if a == b, and 1 if a > b.
+func compare128(aHigh, aLow, bHigh, bLow uint64) int {
+	if aHigh < bHigh {
+		return -1
+	}
+	if aHigh > bHigh {
+		return 1
+	}
+	if aLow < bLow {
+		return -1
+	}
+	if aLow > bLow {
+		return 1
+	}
+	return 0
+}
+
+// add128 adds maxGap to a 128-bit integer (high, low), properly handling carry across words.
+func add128(high, low, gap uint64) (outHigh, outLow uint64) {
+	outLow = low + gap
+	outHigh = high
+	if outLow < low { // Overflow occurred in Low word
+		outHigh++
+	}
+	return outHigh, outLow
+}
+
+// MergeRanges128 sorts and merges strictly overlapping or contiguous 128-bit ranges (maxGap = 1).
 func MergeRanges128(ranges []Uint128Range) []Uint128Range {
+	return MergeRangesWithGap128(ranges, 1)
+}
+
+// MergeRangesWithGap128 sorts and merges overlapping or near-adjacent Uint128Ranges.
+// If the gap between range[i].Max and range[i+1].Min is <= maxGap, they are combined.
+func MergeRangesWithGap128(ranges []Uint128Range, maxGap uint64) []Uint128Range {
 	if len(ranges) <= 1 {
 		return ranges
 	}
 
-	// sort by High bits first, then Low bits
+	// sort ranges by 128-bit Min bound (MinHigh, then MinLow)
 	sort.Slice(ranges, func(i, j int) bool {
-		if ranges[i].MinHigh == ranges[j].MinHigh {
-			return ranges[i].MinLow < ranges[j].MinLow
-		}
-		return ranges[i].MinHigh < ranges[j].MinHigh
+		return compare128(ranges[i].MinHigh, ranges[i].MinLow, ranges[j].MinHigh, ranges[j].MinLow) < 0
 	})
 
-	// merge overlapping or adjacent 128-bit spans
+	// merge overlapping or adjacent ranges
 	merged := make([]Uint128Range, 0, len(ranges))
-	merged = append(merged, ranges[0])
+	current := ranges[0]
 
-	for _, curr := range ranges[1:] {
-		last := &merged[len(merged)-1]
+	for i := 1; i < len(ranges); i++ {
+		next := ranges[i]
 
-		// check if High regions match and Low ranges overlap/touch
-		if curr.MinHigh == last.MaxHigh && curr.MinLow <= last.MaxLow+1 {
-			if curr.MaxLow > last.MaxLow {
-				last.MaxLow = curr.MaxLow
+		// calculate current.Max + maxGap in 128-bit space
+		maxWithGapHigh, maxWithGapLow := add128(current.MaxHigh, current.MaxLow, maxGap)
+
+		// check if next.Min <= (current.Max + maxGap)
+		if compare128(next.MinHigh, next.MinLow, maxWithGapHigh, maxWithGapLow) <= 0 {
+			// extend current.Max if next.Max > current.Max
+			if compare128(next.MaxHigh, next.MaxLow, current.MaxHigh, current.MaxLow) > 0 {
+				current.MaxHigh = next.MaxHigh
+				current.MaxLow = next.MaxLow
 			}
 		} else {
-			merged = append(merged, curr)
+			merged = append(merged, current)
+			current = next
 		}
 	}
+
+	merged = append(merged, current)
 	return merged
 }
 
@@ -343,4 +369,39 @@ func STACGeometryToTileDBRanges(
 
 	// consolidate adjacent and near adjacent 1D ranges using DefaultQueryMaxGap
 	return MergeRangesWithGap(ranges, DefaultQueryMaxGap), nil
+}
+
+// STACGeometryToTileDBRanges128 translates a STAC GeoJSON Geometry into a solid,
+// hierarchically compacted set of 1D TileDB ranges using top down planar decomposition.
+// The approach of top down planar decomposition and compaction, is similar to Uber's H3 PolyFill.
+func STACGeometryToTileDBRanges128(
+	el *rhealpix.Ellipsoid,
+	geom geojson.Geometry,
+	targetRes uint8,
+) ([]Uint128Range, error) {
+
+	g := geom.Geometry()
+	if g == nil {
+		return nil, fmt.Errorf("geometry is nil")
+	}
+
+	// run top down planar decomposition and compaction
+	compactedCells, err := STACGeometryToTileDBRangesTopDown128(el, g, targetRes)
+	if err != nil {
+		return nil, fmt.Errorf("failed top down geometry decomposition: %w", err)
+	}
+
+	if len(compactedCells) == 0 {
+		return nil, nil
+	}
+
+	// convert compacted CellID128 elements into 1D Uint128Ranges
+	ranges := make([]Uint128Range, 0, len(compactedCells))
+	for _, c := range compactedCells {
+		minCell, maxCell := c.SubtreeRangeMax()
+		ranges = append(ranges, NewUint128Range(minCell, maxCell))
+	}
+
+	// consolidate adjacent and near adjacent 1D ranges using DefaultQueryMaxGap
+	return MergeRangesWithGap128(ranges, DefaultQueryMaxGap), nil
 }
