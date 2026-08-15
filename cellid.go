@@ -93,42 +93,57 @@ func CellShape64(id CellID64) CellShape {
 		return ShapeQuad
 	}
 
-	// unpack 4-bit path digits bitwise
 	rawID := uint64(id)
-	isCap := true
-	isDart := true
 
+	// Cap check: all digits must be 4
+	isCap := true
 	for i := uint8(0); i < res; i++ {
 		shift := 52 - (i * 4)
-		digit := uint8((rawID >> shift) & SubCellMask)
-
-		// cap cells are strictly nested under the center cell (sub-cell digit 4) at all depths
-		if digit != 4 {
+		if uint8((rawID>>shift)&SubCellMask) != 4 {
 			isCap = false
-		}
-		// dart cells lie along the cardinal axes and only contain even sub-cell indices (0, 2, 4, 6, 8)
-		if digit%2 != 0 {
-			isDart = false
-		}
-
-		// early exit; once it's neither a cap nor a dart cell, it's guaranteed to be skew quad
-		if !isCap && !isDart {
-			return ShapeSkewQuad
+			break
 		}
 	}
-
 	if isCap {
 		return ShapeCap
 	}
-	if isDart {
+
+	// Dart check 1: all digits in main diagonal {0, 4, 8}
+	isDart1 := true
+	for i := uint8(0); i < res; i++ {
+		shift := 52 - (i * 4)
+		d := uint8((rawID >> shift) & SubCellMask)
+		if d != 0 && d != 4 && d != 8 {
+			isDart1 = false
+			break
+		}
+	}
+	if isDart1 {
 		return ShapeDart
 	}
+
+	// Dart check 2: all digits in anti-diagonal {2, 4, 6}
+	isDart2 := true
+	for i := uint8(0); i < res; i++ {
+		shift := 52 - (i * 4)
+		d := uint8((rawID >> shift) & SubCellMask)
+		if d != 2 && d != 4 && d != 6 {
+			isDart2 = false
+			break
+		}
+	}
+	if isDart2 {
+		return ShapeDart
+	}
+
+	// fallback: must be a Skew Quad
 	return ShapeSkewQuad
 }
 
 // CellShape128 determines the geographic shape classification of a CellID128.
 func CellShape128(id CellID128) CellShape {
 	facet := id.Facet()
+	// equatorial facets (O, P, Q, R -> Facets 1..4) are always standard quads
 	if facet >= 1 && facet <= 4 {
 		return ShapeQuad
 	}
@@ -138,38 +153,55 @@ func CellShape128(id CellID128) CellShape {
 		return ShapeQuad
 	}
 
-	isCap := true
-	isDart := true
-
-	for i := uint8(0); i < res; i++ {
-		var digit uint8
+	// helper to extract a 4-bit sub-cell digit from 128-bit ID
+	getDigit := func(i uint8) uint8 {
 		if i < 14 {
 			shift := 52 - (i * 4)
-			digit = uint8((id.High >> shift) & SubCellMask)
-		} else {
-			shift := 60 - ((i - 14) * 4)
-			digit = uint8((id.Low >> shift) & SubCellMask)
+			return uint8((id.High >> shift) & SubCellMask)
 		}
-
-		if digit != 4 {
-			isCap = false
-		}
-		if digit%2 != 0 {
-			isDart = false
-		}
-
-		// early exit; once it's neither a cap nor a dart cell, it's guaranteed to be skew quad
-		if !isCap && !isDart {
-			return ShapeSkewQuad
-		}
+		shift := 60 - ((i - 14) * 4)
+		return uint8((id.Low >> shift) & SubCellMask)
 	}
 
+	// Cap check: all digits must be 4
+	isCap := true
+	for i := uint8(0); i < res; i++ {
+		if getDigit(i) != 4 {
+			isCap = false
+			break
+		}
+	}
 	if isCap {
 		return ShapeCap
 	}
-	if isDart {
+
+	// Dart check 1: all digits in main diagonal {0, 4, 8}
+	isDart1 := true
+	for i := uint8(0); i < res; i++ {
+		d := getDigit(i)
+		if d != 0 && d != 4 && d != 8 {
+			isDart1 = false
+			break
+		}
+	}
+	if isDart1 {
 		return ShapeDart
 	}
+
+	// Dart check 2: all digits in anti-diagonal {2, 4, 6}
+	isDart2 := true
+	for i := uint8(0); i < res; i++ {
+		d := getDigit(i)
+		if d != 2 && d != 4 && d != 6 {
+			isDart2 = false
+			break
+		}
+	}
+	if isDart2 {
+		return ShapeDart
+	}
+
+	// fallback: must be a Skew Quad
 	return ShapeSkewQuad
 }
 
