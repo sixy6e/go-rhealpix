@@ -82,7 +82,7 @@ func TestSubtreeRange64(t *testing.T) {
 
 func TestSubtreeRange128(t *testing.T) {
 	cell, _ := rhealpix.ParseCellID128("Q01234567890123")
-	minBound, maxBound := cell.SubtreeRange()
+	minBound, maxBound := cell.SubtreeRange(0)
 
 	if minBound.High > maxBound.High || (minBound.High == maxBound.High && minBound.Low >= maxBound.Low) {
 		t.Errorf("invalid SubtreeRange128 bounds: min %s >= max %s", minBound.Hex(), maxBound.Hex())
