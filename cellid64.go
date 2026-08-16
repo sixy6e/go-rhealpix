@@ -59,8 +59,14 @@ func (id CellID64) SubtreeRange(targetRes uint8) (CellID64, CellID64) {
 		return id, id
 	}
 
-	minBound := uint64(id)
-	maxBound := minBound
+	minBound := id
+
+	// preserve base facet, set resolution header to targetRes, keep existing path
+	facetBits := (uint64(id.Facet()) & FacetMask) << FacetShift
+	maxResBits := (uint64(targetRes) & ResMask) << ResShift
+	existingPathBits := uint64(id) & 0x00FFFFFFFFFFFFFF
+
+	maxBound := facetBits | maxResBits | existingPathBits
 
 	// fill trailing 4-bit nibbles from current 'res' up to 'targetRes-1' with max sub-cell digit 8
 	for r := res; r < targetRes; r++ {
@@ -68,7 +74,7 @@ func (id CellID64) SubtreeRange(targetRes uint8) (CellID64, CellID64) {
 		maxBound |= (uint64(8) << s)
 	}
 
-	return CellID64(minBound), CellID64(maxBound)
+	return minBound, CellID64(maxBound)
 }
 
 // SubtreeRangeMax calculates the [Min, Max] range down to absolute MaxResolution64.

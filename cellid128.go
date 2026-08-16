@@ -98,16 +98,23 @@ func (id CellID128) SubtreeRange(targetRes uint8) (CellID128, CellID128) {
 	}
 
 	minBound := id
-	maxBound := id
 
-	// Fill trailing 4-bit nibbles from current 'res' up to 'targetRes-1' with max sub-cell digit 8
+	// preserve base facet, set resolution header to targetRes in High word
+	facetBits := (id.High >> FacetShift) & FacetMask
+	highHeader := ((facetBits & FacetMask) << FacetShift) | ((uint64(targetRes) & ResMask) << ResShift)
+	existingHighPath := id.High & 0x00FFFFFFFFFFFFFF
+
+	maxBound := CellID128{
+		High: highHeader | existingHighPath,
+		Low:  id.Low,
+	}
+
+	// fill trailing 4-bit nibbles from current 'res' up to 'targetRes-1' with max sub-cell digit 8
 	for r := res; r < targetRes; r++ {
 		if r < 14 {
-			// Levels 1..14 affect High word (bits 52 down to 0)
 			s := 52 - (r * 4)
 			maxBound.High |= (uint64(8) << s)
 		} else {
-			// Levels 15..30 affect Low word (bits 60 down to 0)
 			s := 60 - ((r - 14) * 4)
 			maxBound.Low |= (uint64(8) << s)
 		}
