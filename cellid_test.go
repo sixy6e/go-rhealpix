@@ -63,7 +63,7 @@ func TestSubtreeRange64(t *testing.T) {
 		t.Fatalf("ParseCellID64 unexpected error: %v", err)
 	}
 
-	minBound, maxBound := cell.SubtreeRange(0)
+	minBound, maxBound := cell.SubtreeRange(rhealpix.MaxResolution64)
 
 	if minBound.Uint64() >= maxBound.Uint64() {
 		t.Errorf("invalid SubtreeRange bounds: min %s >= max %s", minBound.Hex(), maxBound.Hex())
@@ -76,13 +76,14 @@ func TestSubtreeRange64(t *testing.T) {
 	}
 
 	if childCell.Uint64() < minBound.Uint64() || childCell.Uint64() > maxBound.Uint64() {
-		t.Errorf("child cell %s fell outside range [%s, %s]", childCell.String(), minBound.Hex(), maxBound.Hex())
+		t.Errorf("child cell %s (0x%x) fell outside range [%s, %s]",
+			childCell.String(), childCell.Uint64(), minBound.Hex(), maxBound.Hex())
 	}
 }
 
 func TestSubtreeRange128(t *testing.T) {
 	cell, _ := rhealpix.ParseCellID128("Q01234567890123")
-	minBound, maxBound := cell.SubtreeRange(0)
+	minBound, maxBound := cell.SubtreeRange(rhealpix.MaxResolution128)
 
 	if minBound.High > maxBound.High || (minBound.High == maxBound.High && minBound.Low >= maxBound.Low) {
 		t.Errorf("invalid SubtreeRange128 bounds: min %s >= max %s", minBound.Hex(), maxBound.Hex())
