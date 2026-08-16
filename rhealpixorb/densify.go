@@ -48,7 +48,8 @@ func buildDensifiedRing(el *rhealpix.Ellipsoid, facet uint8, corners [][2]float6
 	return ring
 }
 
-// densifyBoundEdges samples intermediate points along 2D coordinate edges.
+// densifyBoundEdges samples intermediate points along 2D coordinate edges,
+// handling antimeridian wrapping cleanly.
 func densifyBoundEdges(corners []orb.Point, samplesPerEdge int) []orb.Point {
 	if samplesPerEdge < 1 {
 		samplesPerEdge = 1
@@ -65,20 +66,44 @@ func densifyBoundEdges(corners []orb.Point, samplesPerEdge int) []orb.Point {
 		p1 := corners[i]
 		p2 := corners[(i+1)%n]
 
+		lon1, lat1 := p1.X(), p1.Y()
+		lon2, lat2 := p2.X(), p2.Y()
+
+		// shortest longitude delta across the ±180° antimeridian seam
+		dLon := lon2 - lon1
+		if dLon > 180.0 {
+			dLon -= 360.0
+		} else if dLon < -180.0 {
+			dLon += 360.0
+		}
+
 		for s := 0; s < samplesPerEdge; s++ {
 			t := float64(s) / float64(samplesPerEdge)
-			x := lerp(p1.X(), p2.X(), t)
-			y := lerp(p1.Y(), p2.Y(), t)
+
+			x := lon1 + t*dLon
+			y := lerp(lat1, lat2, t)
+
+			// wrap back into [-180, 180] domain
+			if x > 180.0 {
+				x -= 360.0
+			} else if x < -180.0 {
+				x += 360.0
+			}
+
 			pts = append(pts, orb.Point{x, y})
 		}
 	}
 	return pts
 }
 
-// densifyRingEdges interpolates N points along each segment of a polygon ring
+// densifyRingEdges interpolates N points along each segment of a polygon ring,
+// handling antimeridian wrapping cleanly.
 func densifyRingEdges(ring orb.Ring, pointsPerSegment int) []orb.Point {
 	if len(ring) < 2 {
 		return ring
+	}
+	if pointsPerSegment < 1 {
+		pointsPerSegment = 1
 	}
 
 	densified := make([]orb.Point, 0, len(ring)*pointsPerSegment)
@@ -87,10 +112,30 @@ func densifyRingEdges(ring orb.Ring, pointsPerSegment int) []orb.Point {
 		p1 := ring[i]
 		p2 := ring[i+1]
 
+		lon1, lat1 := p1.X(), p1.Y()
+		lon2, lat2 := p2.X(), p2.Y()
+
+		// shortest longitude delta across the ±180° antimeridian seam
+		dLon := lon2 - lon1
+		if dLon > 180.0 {
+			dLon -= 360.0
+		} else if dLon < -180.0 {
+			dLon += 360.0
+		}
+
 		for j := 0; j < pointsPerSegment; j++ {
 			t := float64(j) / float64(pointsPerSegment)
-			x := p1.X() + t*(p2.X()-p1.X())
-			y := p1.Y() + t*(p2.Y()-p1.Y())
+
+			x := lon1 + t*dLon
+			y := lerp(lat1, lat2, t)
+
+			// wrap back into [-180, 180] domain
+			if x > 180.0 {
+				x -= 360.0
+			} else if x < -180.0 {
+				x += 360.0
+			}
+
 			densified = append(densified, orb.Point{x, y})
 		}
 	}
