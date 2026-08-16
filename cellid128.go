@@ -324,10 +324,13 @@ func (id CellID128) Child(subCellIdx uint8) (CellID128, error) {
 		Low:  id.Low,
 	}
 
+	// mask out top 8 header bits (bits 63..56) while preserving all 56 path bits
+	const pathMask = uint64(0x00FFFFFFFFFFFFFF)
+
 	// update resolution header in high word
 	facetBits := (uint64(id.Facet()) & FacetMask) << FacetShift
 	resBits := (uint64(nextRes) & ResMask) << ResShift
-	child.High = (child.High & 0xE000000000000000) | facetBits | resBits
+	child.High = (child.High & pathMask) | facetBits | resBits
 
 	// insert new 4-bit nibble at current level `res`
 	nibble := (uint64(subCellIdx) & SubCellMask)
