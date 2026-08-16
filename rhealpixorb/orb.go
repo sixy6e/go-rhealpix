@@ -16,7 +16,6 @@ import (
 //
 // segmentCount defines how many linear sub-segments to create per cell edge.
 // Use segmentCount = 1 for standard 4-corner polygons, or segmentCount = 8..16
-// for low-resolution / polar cells that curve significantly on a globe.
 func Cell64ToPolygon(el *rhealpix.Ellipsoid, id rhealpix.CellID64, segmentCount int) (orb.Polygon, error) {
 	if id.IsZero() {
 		return nil, fmt.Errorf("zero cell ID")
@@ -27,7 +26,6 @@ func Cell64ToPolygon(el *rhealpix.Ellipsoid, id rhealpix.CellID64, segmentCount 
 
 	// calculate local planar square extent [xMin, xMax], [yMin, yMax] in [0, 1]
 	xMin, xMax, yMin, yMax := cellPlanarExtent64(id)
-	width := xMax - xMin
 
 	// initial planar corner vertices: UL, UR, LR, LL
 	planarCorners := [4][2]float64{
@@ -38,21 +36,24 @@ func Cell64ToPolygon(el *rhealpix.Ellipsoid, id rhealpix.CellID64, segmentCount 
 	}
 
 	// re-order planar vertices for topological alignment (Skew Quads & Darts)
-	alignedCorners := alignVertices(planarCorners, shape, facet, width, el.RA)
+	// essentially move index 0 so it aligns to geographic NW
+	alignedCorners := alignVertices(planarCorners, shape, facet)
 
-	// extract valid, non-collapsed vertices
+	// extract valid non-collapsed vertices
 	validCorners := make([][2]float64, 0, 4)
 	for i, pt := range alignedCorners {
-		// trim degenerate/collapsed seam vertex on Darts
+		// trim degenerate seam vertex ONLY on true Darts:
+		// North Facet (0): pop index 2
+		// South Facet (5): pop index 1
 		if shape == rhealpix.ShapeDart {
 			if (facet == 0 && i == 2) || (facet == 5 && i == 1) {
-				continue // skip collapsed vertex
+				continue
 			}
 		}
 		validCorners = append(validCorners, pt)
 	}
 
-	// construct ring with edge densification in planar space, then project
+	// construct ring with edge densification in planar space, then project to WGS84
 	ring := buildDensifiedRing(el, facet, validCorners, segmentCount)
 	return orb.Polygon{ring}, nil
 }
@@ -67,7 +68,7 @@ func Cell128ToPolygon(el *rhealpix.Ellipsoid, id rhealpix.CellID128, segmentCoun
 	shape := rhealpix.CellShape128(id)
 
 	xMin, xMax, yMin, yMax := cellPlanarExtent128(id)
-	width := xMax - xMin
+	// width := xMax - xMin
 
 	planarCorners := [4][2]float64{
 		{xMin, yMax},
@@ -76,7 +77,7 @@ func Cell128ToPolygon(el *rhealpix.Ellipsoid, id rhealpix.CellID128, segmentCoun
 		{xMin, yMin},
 	}
 
-	alignedCorners := alignVertices(planarCorners, shape, facet, width, el.RA)
+	alignedCorners := alignVertices(planarCorners, shape, facet)
 
 	validCorners := make([][2]float64, 0, 4)
 	for i, pt := range alignedCorners {
@@ -296,6 +297,61 @@ func DeriveRegionCode(el *rhealpix.Ellipsoid, geom orb.Geometry, targetRes uint8
 	return DeriveRegionCode128FromGeometry(el, geom, targetRes)
 }
 
+// DeriveRegionCodeAtRes calculates a fixed-resolution spatial cover string for any orb.Geometry footprint.
+// Each decomposed cell in the string is joined by a hyphen (-).
+// Output examples for target resolution level 3 (1 facet + 3 levels):
+// O003-O006
+// S005-S006-S008
+// S000-S002-S006-S008
+// Output examples for target resolution level 2 (1 facet + 2 levels):
+// S03-S04
+// S03-S04-S06-S07
+// O07
+// S03-S04-S06-S07
+func DeriveRegionCodeAtRes(
+	el *rhealpix.Ellipsoid,
+	geom orb.Geometry,
+	targetRes uint8, // e.g. 3 or 4 for Landsat
+) (string, []string, error) {
+	// walk/decompose geometry up to targetRes
+	cells, err := STACGeometryToTileDBRangesTopDown128(el, geom, targetRes)
+	// cells, err := STACGeometryToTileDBRangesTopDown(el, geom, targetRes)  // testing equivalencce
+	if err != nil {
+		return "", nil, err
+	}
+
+	// extract unique cell string representations at targetRes
+	suidSet := make(map[string]struct{})
+	for _, cell := range cells {
+		suidSet[cell.String()] = struct{}{}
+	}
+
+	suids := make([]string, 0, len(suidSet))
+	for suid := range suidSet {
+		suids = append(suids, suid)
+	}
+
+	sort.Strings(suids)
+	return strings.Join(suids, "-"), suids, nil
+}
+
+// --- wrapers used for testing code external to this repo ---
+// keep as Public funcs for the time being; could change in future
+
+// CellPlanarExtent64 public wrapper for private cellPlanarExtent64.
+// Subject to change, posibly remove in future.
+func CellPlanarExtent64(id rhealpix.CellID64) (xMin, xMax, yMin, yMax float64) {
+	xMin, xMax, yMin, yMax = cellPlanarExtent64(id)
+	return
+}
+
+// AlignVertices public wrapper for private alignVertices.
+// Subject to change, posibly remove in future.
+func AlignVertices(corners [4][2]float64, shape rhealpix.CellShape, facet uint8) (data [4][2]float64) {
+	data = alignVertices(corners, shape, facet)
+	return
+}
+
 // --- Internal Helpers ---
 
 func cellPlanarExtent64(id rhealpix.CellID64) (xMin, xMax, yMin, yMax float64) {
@@ -355,66 +411,51 @@ func cellPlanarExtent128(id rhealpix.CellID128) (xMin, xMax, yMin, yMax float64)
 }
 
 // alignVertices re-orders vertices for Skew Quads and Darts so that geographic NW is preserved.
-func alignVertices(corners [4][2]float64, shape rhealpix.CellShape, facet uint8, width, authalicRadius float64) [4][2]float64 {
+// Essentially, it cyclically rotates planar corners so index 0 corresponds to geographic NW.
+func alignVertices(
+	corners [4][2]float64,
+	shape rhealpix.CellShape,
+	facet uint8,
+) [4][2]float64 {
+	// standard Quadrilaterals and Cap cells require no rotation
 	if shape == rhealpix.ShapeQuad || shape == rhealpix.ShapeCap {
 		return corners
 	}
 
 	idx := 0
 
-	if shape == rhealpix.ShapeSkewQuad {
-		// Calculate nucleus (cell center in local planar space)
-		centerX := corners[3][0] + (width / 2.0)
-		centerY := corners[3][1] + (width / 2.0)
-
-		xpt := centerX * (2.0 * math.Pi)
-		ypt := centerY * (2.0 * math.Pi)
-		eps := 1e-15
-
-		var triangleNum int
-		if facet == 0 { // North Pole ('N')
-			l1 := xpt - (-3.0 * math.Pi / 4.0)
-			l2 := -xpt + (-3.0 * math.Pi / 4.0)
-			if ypt < l1-eps && ypt >= l2-eps {
-				triangleNum = 1
-			} else if ypt >= l1-eps && ypt > l2+eps {
-				triangleNum = 2
-			} else if ypt > l1+eps && ypt <= l2+eps {
-				triangleNum = 3
-			} else {
-				triangleNum = 0
+	if shape == rhealpix.ShapeDart {
+		if facet == 0 { // North Pole Cap ('N')
+			// geographic NW is the poleward vertex (max Y in planar space)
+			maxY := -1.0
+			for i, pt := range corners {
+				if pt[1] > maxY {
+					maxY = pt[1]
+					idx = i
+				}
 			}
-			idx = (4 - triangleNum) % 4
-		} else if facet == 5 { // South Pole ('S')
-			l1 := xpt - (-3.0 * math.Pi / 4.0)
-			l2 := -xpt + (-3.0 * math.Pi / 4.0)
-			if ypt <= l1+eps && ypt > l2+eps {
-				triangleNum = 1
-			} else if ypt < l1-eps && ypt <= l2+eps {
-				triangleNum = 2
-			} else if ypt >= l1-eps && ypt < l2-eps {
-				triangleNum = 3
-			} else {
-				triangleNum = 0
+		} else if facet == 5 { // South Pole Cap ('S')
+			// rotate so the collapsed seam vertex lands at index 1.
+			// starting index at (poleIdx + 3) % 4 aligns index 0 to NW
+			// and puts the seam point at index 1 for pop(1).
+			minY := math.MaxFloat64
+			poleIdx := 0
+			for i, pt := range corners {
+				if pt[1] < minY {
+					minY = pt[1]
+					poleIdx = i
+				}
 			}
-			idx = triangleNum % 4
+			idx = (poleIdx + 3) % 4
 		}
-	} else if shape == rhealpix.ShapeDart {
-		// find most poleward vertex index along Y
-		maxVal := -1.0
-		for i, pt := range corners {
-			val := math.Abs(pt[1] - 0.5) // distance from center line
-			if val > maxVal {
-				maxVal = val
-				idx = i
-			}
-		}
-		if facet == 5 { // South Pole
-			idx = (idx + 1) % 4
+	} else if shape == rhealpix.ShapeSkewQuad {
+		// Skew Quads keep all 4 vertices; align to NW start corner
+		if facet == 0 || facet == 5 {
+			idx = 0
 		}
 	}
 
-	// rotate corner array starting at calculated NW index
+	// cyclic rotation starting at geographic NW (index 0)
 	var rotated [4][2]float64
 	for i := 0; i < 4; i++ {
 		rotated[i] = corners[(idx+i)%4]
@@ -536,4 +577,81 @@ func facetLocalToLonLat(el *rhealpix.Ellipsoid, facet uint8, xLocal, yLocal floa
 
 	// inverse project meters to true geodetic Lon/Lat (degrees)
 	return el.InverseProject(xMeters, yMeters)
+}
+
+// DeriveCentroidRegionCode returns the single rHEALPix cell SUID for the geometry's centroid at targetRes.
+func DeriveCentroidRegionCode(
+	el *rhealpix.Ellipsoid,
+	geom orb.Geometry,
+	targetRes uint8,
+) (string, error) {
+	if geom == nil {
+		return "", fmt.Errorf("geometry is nil")
+	}
+
+	// compute WGS84 bounding box centroid
+	center := geom.Bound().Center()
+
+	// projection from (Lon, Lat) to CellID128 (rhealpix space)
+	cellID, err := rhealpix.ForwardTransform128(el, center.X(), center.Y(), targetRes)
+	if err != nil {
+		return "", fmt.Errorf("failed projecting centroid to cell: %w", err)
+	}
+
+	return cellID.String(), nil
+}
+
+// DeriveBoundingCornerCodes returns the unique rHEALPix cell IDs (max 4, or max 8 if crossing the antimeridian)
+// containing the corners of the geometry's WGS84 bounding box at targetRes.
+// Each decomposed cell in the string is joined by a hyphen (-).
+func DeriveBoundingCornerCodes(
+	el *rhealpix.Ellipsoid,
+	geom orb.Geometry,
+	targetRes uint8,
+) (string, []string, error) {
+	if geom == nil {
+		return "", nil, fmt.Errorf("geometry is nil")
+	}
+
+	bound := geom.Bound()
+	var corners []orb.Point
+
+	if bound.Min.X() > bound.Max.X() {
+		// Antimeridian crossing: split into East [Min.X, 180] and West [-180, Max.X] corner sets
+		corners = []orb.Point{
+			bound.Min,
+			{180.0, bound.Min.Y()},
+			{180.0, bound.Max.Y()},
+			{bound.Min.X(), bound.Max.Y()},
+			{-180.0, bound.Min.Y()},
+			{bound.Max.X(), bound.Min.Y()},
+			bound.Max,
+			{-180.0, bound.Max.Y()},
+		}
+	} else {
+		corners = []orb.Point{
+			bound.Min,
+			{bound.Max.X(), bound.Min.Y()},
+			bound.Max,
+			{bound.Min.X(), bound.Max.Y()},
+		}
+	}
+
+	cellSet := make(map[string]struct{}, len(corners))
+
+	for _, pt := range corners {
+		cellID, err := rhealpix.ForwardTransform128(el, pt.X(), pt.Y(), targetRes)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed projecting corner point %v: %w", pt, err)
+		}
+		cellSet[cellID.String()] = struct{}{}
+	}
+
+	suids := make([]string, 0, len(cellSet))
+	for suid := range cellSet {
+		suids = append(suids, suid)
+	}
+
+	sort.Strings(suids)
+	return strings.Join(suids, "-"), suids, nil
 }
