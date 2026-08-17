@@ -2,6 +2,7 @@ package rhealpixorb
 
 import (
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/paulmach/orb"
@@ -229,7 +230,8 @@ func MergeRanges(ranges []Uint64Range) []Uint64Range {
 }
 
 // MergeRangesWithGap sorts and merges overlapping or near-adjacent Uint64Ranges.
-// If the gap between range[i].Max and range[i+1].Min is <= maxGap, they are combined.
+// If the gap between range[i].Max and range[i+1].Min is <= maxGap, they are combined,
+// provided both ranges share the exact same top-level SUID geographic trunk.
 func MergeRangesWithGap(ranges []Uint64Range, maxGap uint64) []Uint64Range {
 	if len(ranges) <= 1 {
 		return ranges
@@ -247,7 +249,21 @@ func MergeRangesWithGap(ranges []Uint64Range, maxGap uint64) []Uint64Range {
 	for i := 1; i < len(ranges); i++ {
 		next := ranges[i]
 
-		if next.Min <= current.Max+maxGap {
+		// extract top 12 bits (Facet [3 bits] + Res Header [5 bits] + Level 1 Digit [4 bits])
+		// shift by 52 (64 - 12 = 52) to isolate the SUID trunk.
+		currentTrunk := current.Min >> 52
+		nextTrunk := next.Min >> 52
+
+		// safe check against uint64 overflow when adding maxGap
+		canReach := false
+		if current.Max <= math.MaxUint64-maxGap {
+			canReach = (next.Min <= current.Max+maxGap)
+		} else {
+			canReach = (next.Min <= current.Max)
+		}
+
+		// merge ONLY if ranges belong to the SAME SUID trunk AND fall within maxGap
+		if currentTrunk == nextTrunk && canReach {
 			if next.Max > current.Max {
 				current.Max = next.Max
 			}
@@ -294,7 +310,8 @@ func MergeRanges128(ranges []Uint128Range) []Uint128Range {
 }
 
 // MergeRangesWithGap128 sorts and merges overlapping or near-adjacent Uint128Ranges.
-// If the gap between range[i].Max and range[i+1].Min is <= maxGap, they are combined.
+// Combines ranges if the gap between current.Max and next.Min is <= maxGap,
+// provided both ranges share the exact same top-level SUID geographic trunk and resolution header.
 func MergeRangesWithGap128(ranges []Uint128Range, maxGap uint64) []Uint128Range {
 	if len(ranges) <= 1 {
 		return ranges
@@ -302,7 +319,10 @@ func MergeRangesWithGap128(ranges []Uint128Range, maxGap uint64) []Uint128Range 
 
 	// sort ranges by 128-bit Min bound (MinHigh, then MinLow)
 	sort.Slice(ranges, func(i, j int) bool {
-		return compare128(ranges[i].MinHigh, ranges[i].MinLow, ranges[j].MinHigh, ranges[j].MinLow) < 0
+		if ranges[i].MinHigh != ranges[j].MinHigh {
+			return ranges[i].MinHigh < ranges[j].MinHigh
+		}
+		return ranges[i].MinLow < ranges[j].MinLow
 	})
 
 	// merge overlapping or adjacent ranges
@@ -312,13 +332,36 @@ func MergeRangesWithGap128(ranges []Uint128Range, maxGap uint64) []Uint128Range 
 	for i := 1; i < len(ranges); i++ {
 		next := ranges[i]
 
-		// calculate current.Max + maxGap in 128-bit space
-		maxWithGapHigh, maxWithGapLow := add128(current.MaxHigh, current.MaxLow, maxGap)
+		// extract top 12 bits of High word (Facet [3 bits] + Res Header [5 bits] + Level 1 Digit [4 bits])
+		// shift by 52 (64 - 12 = 52) to isolate SUID trunk + resolution header level.
+		currentTrunk := current.MaxHigh >> 52
+		nextTrunk := next.MinHigh >> 52
 
-		// check if next.Min <= (current.Max + maxGap)
-		if compare128(next.MinHigh, next.MinLow, maxWithGapHigh, maxWithGapLow) <= 0 {
-			// extend current.Max if next.Max > current.Max
-			if compare128(next.MaxHigh, next.MaxLow, current.MaxHigh, current.MaxLow) > 0 {
+		// compute (current.Max + maxGap) with 128-bit overflow safety
+		reachHigh := current.MaxHigh
+		reachLow := current.MaxLow
+
+		if math.MaxUint64-current.MaxLow < maxGap {
+			// Low word overflows into High word
+			if current.MaxHigh < math.MaxUint64 {
+				reachHigh = current.MaxHigh + 1
+				reachLow = maxGap - (math.MaxUint64 - current.MaxLow) - 1
+			} else {
+				// cap at absolute 128-bit limit
+				reachLow = math.MaxUint64
+			}
+		} else {
+			reachLow = current.MaxLow + maxGap
+		}
+
+		// check if next.Min <= (current.Max + maxGap) in 128-bit comparison
+		canReach := (next.MinHigh < reachHigh) ||
+			(next.MinHigh == reachHigh && next.MinLow <= reachLow)
+
+		// merge ONLY if ranges share the exact same SUID trunk & resolution level AND fall within maxGap
+		if currentTrunk == nextTrunk && canReach {
+			// update current.Max to max(current.Max, next.Max)
+			if next.MaxHigh > current.MaxHigh || (next.MaxHigh == current.MaxHigh && next.MaxLow > current.MaxLow) {
 				current.MaxHigh = next.MaxHigh
 				current.MaxLow = next.MaxLow
 			}
@@ -335,7 +378,6 @@ func MergeRangesWithGap128(ranges []Uint128Range, maxGap uint64) []Uint128Range 
 // STACGeometryToTileDBRanges translates a STAC GeoJSON Geometry into a solid,
 // hierarchically compacted set of 1D TileDB ranges using top down planar decomposition.
 // The approach of top down planar decomposition and compaction, is similar to Uber's H3 PolyFill.
-// TODO; update to support both Uint64Range and Uint128Range.
 func STACGeometryToTileDBRanges(
 	el *rhealpix.Ellipsoid,
 	geom geojson.Geometry,
@@ -360,7 +402,8 @@ func STACGeometryToTileDBRanges(
 	// convert compacted CellID64 elements into 1D Uint64Ranges
 	ranges := make([]Uint64Range, 0, len(compactedCells))
 	for _, c := range compactedCells {
-		minCell, maxCell := c.SubtreeRangeMax()
+		// minCell, maxCell := c.SubtreeRangeMax()
+		minCell, maxCell := c.SubtreeRange(targetRes)
 		ranges = append(ranges, Uint64Range{
 			Min: uint64(minCell),
 			Max: uint64(maxCell),
@@ -398,7 +441,8 @@ func STACGeometryToTileDBRanges128(
 	// convert compacted CellID128 elements into 1D Uint128Ranges
 	ranges := make([]Uint128Range, 0, len(compactedCells))
 	for _, c := range compactedCells {
-		minCell, maxCell := c.SubtreeRangeMax()
+		// minCell, maxCell := c.SubtreeRangeMax()
+		minCell, maxCell := c.SubtreeRange(targetRes)
 		ranges = append(ranges, NewUint128Range(minCell, maxCell))
 	}
 
