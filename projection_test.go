@@ -80,6 +80,13 @@ func TestComputeCellPath_GroundTruth(t *testing.T) {
 			res:      15,
 			wantSUID: "N444444444444444",
 		},
+		{
+			name:     "Canberra",
+			lon:      149.1300,
+			lat:      -35.2809,
+			res:      12,
+			wantSUID: "R785234521534",
+		},
 	}
 
 	for _, tt := range tests {
