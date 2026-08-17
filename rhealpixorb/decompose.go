@@ -31,10 +31,15 @@ func decomposeCell(
 		return
 	}
 
-	// SHORT-CIRCUIT: reached targetRes OR cell is fully enclosed -> Emit Range & STOP
+	// MAX DELTA: only short-circuit on full containment if within 2 levels of targetRes.
+	// coarser cells (e.g. Res 5 when target is 12) MUST keep decomposing.
+	maxDelta := uint8(2)
+	isNearTarget := (targetRes >= maxDelta) && (currentRes >= targetRes-maxDelta)
+
+	// SHORT-CIRCUIT: reached targetRes OR (cell is fully enclosed AND near targetRes) -> Emit Range & STOP
 	// don't want any infinite recursion or even getting into nanometre precision,
 	// nor millions of children
-	if currentRes >= targetRes || boundsContains(bound, cellBound) {
+	if currentRes >= targetRes || (boundsContains(bound, cellBound) && isNearTarget) {
 		minCell, maxCell := cell.SubtreeRange(targetRes)
 		*ranges = append(*ranges, Uint64Range{
 			Min: uint64(minCell),
@@ -44,15 +49,7 @@ func decomposeCell(
 	}
 
 	// straddles boundary -> recurse into 9 sub-cells
-	// facet, res, path, err := rhealpix.DecodeCellID64(cell)
-	// if err != nil {
-	// 	return
-	// }
-
-	// straddles boundary -> recurse into 9 sub-cells
 	for digit := uint8(0); digit < 9; digit++ {
-		// childPath := append(append([]uint8(nil), path...), digit)
-		// childCell, err := rhealpix.PackCellID64(facet, res+1, childPath)
 		childCell, err := cell.Child(digit)
 		if err != nil {
 			continue
@@ -82,17 +79,15 @@ func decomposeCell128(
 		return
 	}
 
-	// SHORT-CIRCUIT: reached targetRes OR cell is fully enclosed -> Emit Range & STOP
+	// MAX DELTA: only short-circuit on full containment if within 2 levels of targetRes.
+	maxDelta := uint8(2)
+	isNearTarget := (targetRes >= maxDelta) && (currentRes >= targetRes-maxDelta)
+
+	// SHORT-CIRCUIT: reached targetRes OR (cell is fully enclosed AND near targetRes) -> Emit Range & STOP
 	// don't want any infinite recursion or even getting into nanometre precision,
 	// nor millions of children
-	if currentRes >= targetRes || boundsContains(bound, cellBound) {
+	if currentRes >= targetRes || (boundsContains(bound, cellBound) && isNearTarget) {
 		minCell, maxCell := cell.SubtreeRange(targetRes)
-		// *ranges = append(*ranges, Uint128Range{
-		// 	MinHigh: minCell.High,
-		// 	MinLow:  minCell.Low,
-		// 	MaxHigh: maxCell.High,
-		// 	MaxLow:  maxCell.Low,
-		// })
 		*ranges = append(*ranges, NewUint128Range(minCell, maxCell))
 		return // CRITICAL: stop recursing down this branch!
 	}
