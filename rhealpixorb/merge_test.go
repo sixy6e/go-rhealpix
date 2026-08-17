@@ -3,7 +3,8 @@ package rhealpixorb
 import (
 	"reflect"
 	"testing"
-	// rhealpix "github.com/sixy6e/go-rhealpix"
+
+	rhealpix "github.com/sixy6e/go-rhealpix"
 )
 
 func TestMergeRangesWithGap128(t *testing.T) {
@@ -137,4 +138,85 @@ func TestAdd128Carry(t *testing.T) {
 	if high != 6 || low != 1 {
 		t.Errorf("add128 overflow with gap failed: got (%d, %d), want (6, 1)", high, low)
 	}
+}
+
+// ============================================================================
+// RANGE MERGING SECURITY TESTS
+// ============================================================================
+
+func TestMergeRangesDisjointTrunks(t *testing.T) {
+	gap := uint64(100)
+
+	t.Run("64-bit Disjoint Trunk Isolation", func(t *testing.T) {
+		// R7... vs R8... trunks at Res 12
+		cellR7, _ := rhealpix.PackCellID64(4, 1, []uint8{7})
+		cellR8, _ := rhealpix.PackCellID64(4, 1, []uint8{8})
+
+		r7Min, r7Max := cellR7.SubtreeRange(12)
+		r8Min, r8Max := cellR8.SubtreeRange(12)
+
+		ranges := []Uint64Range{
+			{Min: uint64(r7Min), Max: uint64(r7Max)},
+			{Min: uint64(r8Min), Max: uint64(r8Max)},
+		}
+
+		merged := MergeRangesWithGap(ranges, gap)
+		if len(merged) != 2 {
+			t.Fatalf("expected 2 unmerged ranges across disjoint trunks, got %d", len(merged))
+		}
+	})
+
+	t.Run("128-bit Disjoint Trunk Isolation", func(t *testing.T) {
+		cellR7, _ := rhealpix.PackCellID128(4, 1, []uint8{7})
+		cellR8, _ := rhealpix.PackCellID128(4, 1, []uint8{8})
+
+		r7Min, r7Max := cellR7.SubtreeRange(20)
+		r8Min, r8Max := cellR8.SubtreeRange(20)
+
+		ranges := []Uint128Range{
+			{MinHigh: r7Min.High, MinLow: r7Min.Low, MaxHigh: r7Max.High, MaxLow: r7Max.Low},
+			{MinHigh: r8Min.High, MinLow: r8Min.Low, MaxHigh: r8Max.High, MaxLow: r8Max.Low},
+		}
+
+		merged := MergeRangesWithGap128(ranges, gap)
+		if len(merged) != 2 {
+			t.Fatalf("expected 2 unmerged 128-bit ranges across disjoint trunks, got %d", len(merged))
+		}
+	})
+}
+
+func TestMergeRangesResolutionIsolation(t *testing.T) {
+	gap := uint64(100)
+
+	t.Run("64-bit Resolution Level Isolation", func(t *testing.T) {
+		cell, _ := rhealpix.PackCellID64(4, 1, []uint8{7})
+		rRes10Min, rRes10Max := cell.SubtreeRange(10)
+		rRes12Min, rRes12Max := cell.SubtreeRange(12)
+
+		ranges := []Uint64Range{
+			{Min: uint64(rRes10Min), Max: uint64(rRes10Max)},
+			{Min: uint64(rRes12Min), Max: uint64(rRes12Max)},
+		}
+
+		merged := MergeRangesWithGap(ranges, gap)
+		if len(merged) != 2 {
+			t.Fatalf("expected 2 unmerged ranges across different resolution headers, got %d", len(merged))
+		}
+	})
+
+	t.Run("128-bit Resolution Level Isolation", func(t *testing.T) {
+		cell, _ := rhealpix.PackCellID128(4, 1, []uint8{7})
+		rRes10Min, rRes10Max := cell.SubtreeRange(10)
+		rRes12Min, rRes12Max := cell.SubtreeRange(12)
+
+		ranges := []Uint128Range{
+			{MinHigh: rRes10Min.High, MinLow: rRes10Min.Low, MaxHigh: rRes10Max.High, MaxLow: rRes10Max.Low},
+			{MinHigh: rRes12Min.High, MinLow: rRes12Min.Low, MaxHigh: rRes12Max.High, MaxLow: rRes12Max.Low},
+		}
+
+		merged := MergeRangesWithGap128(ranges, gap)
+		if len(merged) != 2 {
+			t.Fatalf("expected 2 unmerged 128-bit ranges across different resolution headers, got %d", len(merged))
+		}
+	})
 }
