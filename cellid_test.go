@@ -57,22 +57,50 @@ func TestCommonAncestor64(t *testing.T) {
 	}
 }
 
+// OLD; keep around as could use it later to test that we don't try searching higher than ingested
+// but also if it gets resolved at a future date, bring the test back.
+// func TestSubtreeRange64(t *testing.T) {
+// 	cell, err := rhealpix.ParseCellID64("Q012")
+// 	if err != nil {
+// 		t.Fatalf("ParseCellID64 unexpected error: %v", err)
+// 	}
+//
+// 	minBound, maxBound := cell.SubtreeRange(rhealpix.MaxResolution64)
+//
+// 	if minBound.Uint64() >= maxBound.Uint64() {
+// 		t.Errorf("invalid SubtreeRange bounds: min %s >= max %s", minBound.Hex(), maxBound.Hex())
+// 	}
+//
+// 	// test child cell
+// 	childCell, err := rhealpix.ParseCellID64("Q0128")
+// 	if err != nil {
+// 		t.Fatalf("ParseCellID64 child error: %v", err)
+// 	}
+//
+// 	if childCell.Uint64() < minBound.Uint64() || childCell.Uint64() > maxBound.Uint64() {
+// 		t.Errorf("child cell %s (0x%x) fell outside range [%s, %s]",
+// 			childCell.String(), childCell.Uint64(), minBound.Hex(), maxBound.Hex())
+// 	}
+// }
+
 func TestSubtreeRange64(t *testing.T) {
 	cell, err := rhealpix.ParseCellID64("Q012")
 	if err != nil {
 		t.Fatalf("ParseCellID64 unexpected error: %v", err)
 	}
 
-	minBound, maxBound := cell.SubtreeRange(rhealpix.MaxResolution64)
-
-	if minBound.Uint64() >= maxBound.Uint64() {
-		t.Errorf("invalid SubtreeRange bounds: min %s >= max %s", minBound.Hex(), maxBound.Hex())
-	}
-
-	// test child cell
+	// parse child cell (Level 4)
 	childCell, err := rhealpix.ParseCellID64("Q0128")
 	if err != nil {
 		t.Fatalf("ParseCellID64 child error: %v", err)
+	}
+
+	// target resolution must match the child cell's resolution level (Res 4)
+	targetRes := childCell.Resolution()
+	minBound, maxBound := cell.SubtreeRange(targetRes)
+
+	if minBound.Uint64() >= maxBound.Uint64() {
+		t.Errorf("invalid SubtreeRange bounds: min %s >= max %s", minBound.Hex(), maxBound.Hex())
 	}
 
 	if childCell.Uint64() < minBound.Uint64() || childCell.Uint64() > maxBound.Uint64() {
@@ -81,17 +109,52 @@ func TestSubtreeRange64(t *testing.T) {
 	}
 }
 
-func TestSubtreeRange128(t *testing.T) {
-	cell, _ := rhealpix.ParseCellID128("Q01234567890123")
-	minBound, maxBound := cell.SubtreeRange(rhealpix.MaxResolution128)
+// OLD; keep around as could use it later to test that we don't try searching higher than ingested
+// but also if it gets resolved at a future date, bring the test back.
+//	func TestSubtreeRange128(t *testing.T) {
+//		cell, _ := rhealpix.ParseCellID128("Q01234567890123")
+//		minBound, maxBound := cell.SubtreeRange(rhealpix.MaxResolution128)
+//
+//		if minBound.High > maxBound.High || (minBound.High == maxBound.High && minBound.Low >= maxBound.Low) {
+//			t.Errorf("invalid SubtreeRange128 bounds: min %s >= max %s", minBound.Hex(), maxBound.Hex())
+//		}
+//
+//		childCell, _ := rhealpix.ParseCellID128("Q012345678901238")
+//		if childCell.High < minBound.High || childCell.High > maxBound.High {
+//			t.Errorf("child cell High word %x fell outside [%x, %x]", childCell.High, minBound.High, maxBound.High)
+//		}
+//	}
 
-	if minBound.High > maxBound.High || (minBound.High == maxBound.High && minBound.Low >= maxBound.Low) {
+func TestSubtreeRange128(t *testing.T) {
+	// Level 14 cell using valid digits (0..8)
+	cell, err := rhealpix.ParseCellID128("Q01234567801234")
+	if err != nil {
+		t.Fatalf("ParseCellID128 unexpected error: %v", err)
+	}
+
+	// Level 15 child cell
+	childCell, err := rhealpix.ParseCellID128("Q012345678012348")
+	if err != nil {
+		t.Fatalf("ParseCellID128 child error: %v", err)
+	}
+
+	// target resolution must match childCell's resolution level (Res 15)
+	targetRes := childCell.Resolution()
+	minBound, maxBound := cell.SubtreeRange(targetRes)
+
+	// validate min < max in 128-bit space
+	minIsLess := minBound.High < maxBound.High || (minBound.High == maxBound.High && minBound.Low < maxBound.Low)
+	if !minIsLess {
 		t.Errorf("invalid SubtreeRange128 bounds: min %s >= max %s", minBound.Hex(), maxBound.Hex())
 	}
 
-	childCell, _ := rhealpix.ParseCellID128("Q012345678901238")
-	if childCell.High < minBound.High || childCell.High > maxBound.High {
-		t.Errorf("child cell High word %x fell outside [%x, %x]", childCell.High, minBound.High, maxBound.High)
+	// validate childCell falls inside [minBound, maxBound] across both High and Low words
+	childGeMin := childCell.High > minBound.High || (childCell.High == minBound.High && childCell.Low >= minBound.Low)
+	childLeMax := childCell.High < maxBound.High || (childCell.High == maxBound.High && childCell.Low <= maxBound.Low)
+
+	if !childGeMin || !childLeMax {
+		t.Errorf("child cell %s (Hex: %s) fell outside range [%s, %s]",
+			childCell.String(), childCell.Hex(), minBound.Hex(), maxBound.Hex())
 	}
 }
 
@@ -300,6 +363,198 @@ func TestPackCellID64_RootFacets(t *testing.T) {
 			if cellID.Facet() != facet {
 				t.Errorf("facet mismatch at deep res: got %d, want %d", cellID.Facet(), facet)
 			}
+		}
+	})
+}
+
+// ============================================================================
+// BIT-PACKING TESTS
+// ============================================================================
+
+func TestFacet0RootCellRoundTrip(t *testing.T) {
+	t.Run("64-bit R0", func(t *testing.T) {
+		cell, err := rhealpix.PackCellID64(0, 0, nil)
+		if err != nil {
+			t.Fatalf("failed to pack Facet 0 Res 0: %v", err)
+		}
+
+		if cell.IsZero() {
+			t.Fatalf("expected IsZero() to be false for valid R0 cell")
+		}
+
+		facet, res, path, err := rhealpix.DecodeCellID64(cell)
+		if err != nil {
+			t.Fatalf("DecodeCellID64 unexpected error: %v", err)
+		}
+		if facet != 0 || res != 0 || len(path) != 0 {
+			t.Errorf("got facet=%d res=%d path=%v, want facet=0 res=0 path=[]", facet, res, path)
+		}
+	})
+
+	t.Run("128-bit R0", func(t *testing.T) {
+		cell, err := rhealpix.PackCellID128(0, 0, nil)
+		if err != nil {
+			t.Fatalf("failed to pack 128-bit Facet 0 Res 0: %v", err)
+		}
+
+		if cell.IsZero() {
+			t.Fatalf("expected IsZero() to be false for valid 128-bit R0 cell")
+		}
+
+		facet, res, path, err := rhealpix.DecodeCellID128(cell)
+		if err != nil {
+			t.Fatalf("DecodeCellID128 unexpected error: %v", err)
+		}
+		if facet != 0 || res != 0 || len(path) != 0 {
+			t.Errorf("got facet=%d res=%d path=%v, want facet=0 res=0 path=[]", facet, res, path)
+		}
+	})
+}
+
+func TestStaleNibbleScrubbing(t *testing.T) {
+	digits := []uint8{1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4}
+
+	t.Run("64-bit Stale Nibble Cleaning", func(t *testing.T) {
+		deepCell, err := rhealpix.PackCellID64(4, 12, digits)
+		if err != nil {
+			t.Fatalf("failed to pack deep cell: %v", err)
+		}
+
+		parent, err := deepCell.Parent(5)
+		if err != nil {
+			t.Fatalf("failed to get parent(5): %v", err)
+		}
+
+		child, err := parent.Child(8)
+		if err != nil {
+			t.Fatalf("failed to derive child(8): %v", err)
+		}
+
+		facet, res, path, err := rhealpix.DecodeCellID64(child)
+		if err != nil {
+			t.Fatalf("failed decoding child: %v", err)
+		}
+
+		expectedPath := []uint8{1, 2, 3, 4, 5, 8}
+		if facet != 4 || res != 6 || !reflect.DeepEqual(path, expectedPath) {
+			t.Errorf("got facet=%d res=%d path=%v, want facet=4 res=6 path=%v", facet, res, path, expectedPath)
+		}
+	})
+
+	t.Run("128-bit Stale Nibble Cleaning", func(t *testing.T) {
+		deepCell, err := rhealpix.PackCellID128(4, 12, digits)
+		if err != nil {
+			t.Fatalf("failed to pack 128-bit deep cell: %v", err)
+		}
+
+		parent, err := deepCell.Parent(5)
+		if err != nil {
+			t.Fatalf("failed to get parent(5): %v", err)
+		}
+
+		child, err := parent.Child(8)
+		if err != nil {
+			t.Fatalf("failed to derive child(8): %v", err)
+		}
+
+		facet, res, path, err := rhealpix.DecodeCellID128(child)
+		if err != nil {
+			t.Fatalf("failed decoding 128-bit child: %v", err)
+		}
+
+		expectedPath := []uint8{1, 2, 3, 4, 5, 8}
+		if facet != 4 || res != 6 || !reflect.DeepEqual(path, expectedPath) {
+			t.Errorf("got facet=%d res=%d path=%v, want facet=4 res=6 path=%v", facet, res, path, expectedPath)
+		}
+	})
+}
+
+func TestWordBoundaryCrossing128(t *testing.T) {
+	path14 := []uint8{1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2, 3, 4, 5}
+	cell14, err := rhealpix.PackCellID128(2, 14, path14)
+	if err != nil {
+		t.Fatalf("failed packing level 14 cell: %v", err)
+	}
+
+	cell15, err := cell14.Child(7)
+	if err != nil {
+		t.Fatalf("failed deriving child at level 15: %v", err)
+	}
+
+	facet, res, path, err := rhealpix.DecodeCellID128(cell15)
+	if err != nil {
+		t.Fatalf("failed decoding level 15 cell: %v", err)
+	}
+
+	expectedPath := append(path14, 7)
+	if facet != 2 || res != 15 || !reflect.DeepEqual(path, expectedPath) {
+		t.Errorf("got facet=%d res=%d path=%v, want facet=2 res=15 path=%v", facet, res, path, expectedPath)
+	}
+
+	// verify low word receives the 15th digit at shift 60
+	expectedLow := uint64(7) << 60
+	if cell15.Low != expectedLow {
+		t.Errorf("got Low=0x%X, want 0x%X", cell15.Low, expectedLow)
+	}
+}
+
+// ============================================================================
+// SUBTREE RANGE INVARIANT TESTS
+// ============================================================================
+
+func TestSubtreeRangeHeaderAlignment(t *testing.T) {
+	t.Run("64-bit Header Alignment", func(t *testing.T) {
+		parent, _ := rhealpix.PackCellID64(4, 5, []uint8{1, 2, 3, 4, 5})
+		targetRes := uint8(12)
+		minB, maxB := parent.SubtreeRange(targetRes)
+
+		if minB.Resolution() != targetRes || maxB.Resolution() != targetRes {
+			t.Fatalf("got minRes=%d maxRes=%d, want targetRes=%d", minB.Resolution(), maxB.Resolution(), targetRes)
+		}
+	})
+
+	t.Run("128-bit Header Alignment", func(t *testing.T) {
+		parent, _ := rhealpix.PackCellID128(4, 5, []uint8{1, 2, 3, 4, 5})
+		targetRes := uint8(20)
+		minB, maxB := parent.SubtreeRange(targetRes)
+
+		if minB.Resolution() != targetRes || maxB.Resolution() != targetRes {
+			t.Fatalf("got minRes=%d maxRes=%d, want targetRes=%d", minB.Resolution(), maxB.Resolution(), targetRes)
+		}
+	})
+}
+
+func TestSubtreeRangeTrueChildEnclosure(t *testing.T) {
+	t.Run("64-bit Enclosure", func(t *testing.T) {
+		parent, _ := rhealpix.PackCellID64(4, 5, []uint8{1, 2, 3, 4, 5})
+		targetRes := uint8(12)
+		minB, maxB := parent.SubtreeRange(targetRes)
+
+		curr := parent
+		for r := uint8(5); r < targetRes; r++ {
+			curr, _ = curr.Child(r % 9)
+		}
+
+		if curr.Uint64() < minB.Uint64() || curr.Uint64() > maxB.Uint64() {
+			t.Fatalf("Descendant %s fell outside SubtreeRange [0x%X, 0x%X]", curr.Hex(), minB.Uint64(), maxB.Uint64())
+		}
+	})
+
+	t.Run("128-bit Enclosure", func(t *testing.T) {
+		parent, _ := rhealpix.PackCellID128(4, 5, []uint8{1, 2, 3, 4, 5})
+		targetRes := uint8(20)
+		minB, maxB := parent.SubtreeRange(targetRes)
+
+		curr := parent
+		for r := uint8(5); r < targetRes; r++ {
+			curr, _ = curr.Child(r % 9)
+		}
+
+		childGeMin := curr.High > minB.High || (curr.High == minB.High && curr.Low >= minB.Low)
+		childLeMax := curr.High < maxB.High || (curr.High == maxB.High && curr.Low <= maxB.Low)
+
+		if !childGeMin || !childLeMax {
+			t.Fatalf("Descendant %s fell outside 128-bit SubtreeRange [%s, %s]", curr.Hex(), minB.Hex(), maxB.Hex())
 		}
 	})
 }
