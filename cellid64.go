@@ -48,8 +48,14 @@ func (id CellID64) IsZero() bool {
 	return id.Facet() > 5 || id.Resolution() > MaxResolution64
 }
 
+// IsValid checks if the cell ID represents a valid non-zero 64-bit rHEALPix cell.
+func (id CellID64) IsValid() bool {
+	return id != 0 && id.Facet() <= 5 && id.Resolution() <= MaxResolution64
+}
+
 // SubtreeRange calculates the [Min, Max] 64-bit integer range enclosing ALL child cells
 // down to targetRes. Essential for direct TileDB, RocksDB, or B-Tree 1D spatial range queries.
+// Both Min and Max have their resolution headers set to targetRes.
 // If the cell is already at or below targetRes, Min and Max are identical [id, id].
 func (id CellID64) SubtreeRange(targetRes uint8) (CellID64, CellID64) {
 	res := id.Resolution()
@@ -59,22 +65,25 @@ func (id CellID64) SubtreeRange(targetRes uint8) (CellID64, CellID64) {
 		return id, id
 	}
 
-	minBound := id
-
-	// preserve base facet, set resolution header to targetRes, keep existing path
 	facetBits := (uint64(id.Facet()) & FacetMask) << FacetShift
-	maxResBits := (uint64(targetRes) & ResMask) << ResShift
+	targetResBits := (uint64(targetRes) & ResMask) << ResShift
 	existingPathBits := uint64(id) & 0x00FFFFFFFFFFFFFF
 
-	maxBound := facetBits | maxResBits | existingPathBits
+	// both minBound and maxBound MUST have targetRes in bits 60..56
+	minHeader := facetBits | targetResBits | existingPathBits
+	maxHeader := minHeader
 
-	// fill trailing 4-bit nibbles from current 'res' up to 'targetRes-1' with max sub-cell digit 8
+	// minBound keeps 0s in trailing nibbles (already 0 in existingPathBits)
+	minBound := minHeader
+
+	// maxBound fills trailing 4-bit nibbles from 'res' up to 'targetRes-1' with 8
+	maxBound := maxHeader
 	for r := res; r < targetRes; r++ {
 		s := 52 - (r * 4)
 		maxBound |= (uint64(8) << s)
 	}
 
-	return minBound, CellID64(maxBound)
+	return CellID64(minBound), CellID64(maxBound)
 }
 
 // SubtreeRangeMax calculates the [Min, Max] range down to absolute MaxResolution64.
@@ -92,15 +101,14 @@ func (id CellID64) Parent(targetLevel uint8) (CellID64, error) {
 		return id, nil
 	}
 
-	// shift out the trailing unused 4-bit nibbles
-	shift := (14 - targetLevel) * 4
-	mask := uint64(0xFFFFFFFFFFFFFFFF) << shift
-
 	facetBits := (uint64(id.Facet()) & FacetMask) << FacetShift
 	resBits := (uint64(targetLevel) & ResMask) << ResShift
-	pathBits := (uint64(id) & mask) & 0x00FFFFFFFFFFFFFF
 
-	return CellID64(facetBits | resBits | pathBits), nil
+	unusedNibbles := (14 - targetLevel) * 4
+	pathMask := (uint64(0x00FFFFFFFFFFFFFF) >> unusedNibbles) << unusedNibbles
+	existingPathBits := uint64(id) & pathMask
+
+	return CellID64(facetBits | resBits | existingPathBits), nil
 }
 
 // CommonAncestor64 calculates the lowest common ancestor (LCA) between two 64-bit cells.
@@ -164,7 +172,7 @@ func (id CellID64) DebugString() string {
 // DecodeCellID64 unpacks a 64-bit CellID64 into its base facet (0..5),
 // target resolution, and sub-cell digit path (0..8 for each level).
 func DecodeCellID64(cellID CellID64) (facet uint8, res uint8, path []uint8, err error) {
-	if cellID == 0 {
+	if cellID.IsZero() {
 		return 0, 0, nil, ErrInvalidCellID
 	}
 
@@ -202,7 +210,6 @@ func UnpackCellID64(cellID CellID64) (facet uint8, res uint8, path []uint8, err 
 }
 
 // Child returns the nth child cell (0..8) at the next resolution level (res + 1).
-// Operates purely bitwise without allocating slices.
 func (id CellID64) Child(subCellIdx uint8) (CellID64, error) {
 	if subCellIdx > 8 {
 		return 0, fmt.Errorf("invalid sub-cell index %d: must be 0..8", subCellIdx)
@@ -222,8 +229,14 @@ func (id CellID64) Child(subCellIdx uint8) (CellID64, error) {
 	facetBits := (uint64(id.Facet()) & FacetMask) << FacetShift
 	resBits := (uint64(nextRes) & ResMask) << ResShift
 
-	// preserve existing path bits up to level `res`, then set new nibble
-	existingPathBits := uint64(id) & 0x00FFFFFFFFFFFFFF
+	// mask path bits to ONLY preserve levels 1..res, clearing any trailing stale nibbles
+	var pathMask uint64
+	if res > 0 {
+		unusedBits := (14 - res) * 4
+		pathMask = (uint64(0x00FFFFFFFFFFFFFF) >> unusedBits) << unusedBits
+	}
+
+	existingPathBits := uint64(id) & pathMask
 	newNibbleBit := (uint64(subCellIdx) & SubCellMask) << shift
 
 	return CellID64(facetBits | resBits | existingPathBits | newNibbleBit), nil

@@ -86,9 +86,13 @@ func (id CellID128) IsZero() bool {
 	return id.Facet() > 5 || id.Resolution() > MaxResolution128
 }
 
+// IsValid checks if the cell ID represents a valid non-zero 128-bit rHEALPix cell.
+func (id CellID128) IsValid() bool {
+	return !(id.High == 0 && id.Low == 0) && id.Facet() <= 5 && id.Resolution() <= MaxResolution128
+}
+
 // SubtreeRange calculates the [Min, Max] 128-bit integer range enclosing ALL child cells
-// down to targetRes. Essential for direct TileDB, RocksDB, or B-Tree 1D spatial range queries.
-// If the cell is already at or below targetRes, Min and Max are identical [id, id].
+// down to targetRes. Both Min and Max have their resolution headers set to targetRes.
 func (id CellID128) SubtreeRange(targetRes uint8) (CellID128, CellID128) {
 	res := id.Resolution()
 
@@ -97,15 +101,20 @@ func (id CellID128) SubtreeRange(targetRes uint8) (CellID128, CellID128) {
 		return id, id
 	}
 
-	minBound := id
-
-	// preserve base facet, set resolution header to targetRes in High word
-	facetBits := (id.High >> FacetShift) & FacetMask
-	highHeader := ((facetBits & FacetMask) << FacetShift) | ((uint64(targetRes) & ResMask) << ResShift)
+	facetBits := (uint64(id.Facet()) & FacetMask) << FacetShift
+	targetResBits := (uint64(targetRes) & ResMask) << ResShift
 	existingHighPath := id.High & 0x00FFFFFFFFFFFFFF
 
+	// set resolution header to targetRes in High word
+	highHeader := facetBits | targetResBits | existingHighPath
+
+	minBound := CellID128{
+		High: highHeader,
+		Low:  id.Low,
+	}
+
 	maxBound := CellID128{
-		High: highHeader | existingHighPath,
+		High: highHeader,
 		Low:  id.Low,
 	}
 
@@ -155,18 +164,17 @@ func (id CellID128) Parent(targetLevel uint8) (CellID128, error) {
 		// target parent resides entirely within high word (levels 1..14)
 		// low word becomes completely zeroed out
 		if targetLevel > 0 {
-			shift := (14 - targetLevel) * 4
-			mask := ^uint64(0) << shift
-			parent.High |= (id.High & 0x00FFFFFFFFFFFFFF) & mask
+			unusedHighNibbles := (14 - targetLevel) * 4
+			highMask := (uint64(0x00FFFFFFFFFFFFFF) >> unusedHighNibbles) << unusedHighNibbles
+			parent.High |= (id.High & highMask)
 		}
-		// parent.Low remains 0
 	} else {
 		// target parent includes all 14 high levels, plus a subset of low levels (levels 15..30)
 		parent.High |= (id.High & 0x00FFFFFFFFFFFFFF)
 
-		shift := (30 - targetLevel) * 4
-		mask := ^uint64(0) << shift
-		parent.Low = id.Low & mask
+		unusedLowNibbles := (30 - targetLevel) * 4
+		lowMask := (uint64(0xFFFFFFFFFFFFFFFF) >> unusedLowNibbles) << unusedLowNibbles
+		parent.Low = id.Low & lowMask
 	}
 
 	return parent, nil
@@ -269,7 +277,7 @@ func (id CellID128) DebugString() string {
 // DecodeCellID128 unpacks a 128-bit CellID128 into its base facet (0..5),
 // target resolution, and sub-cell digit path (0..8 for each level).
 func DecodeCellID128(cellID CellID128) (facet uint8, res uint8, path []uint8, err error) {
-	if cellID.High == 0 && cellID.Low == 0 {
+	if cellID.IsZero() {
 		return 0, 0, nil, ErrInvalidCellID
 	}
 
@@ -313,7 +321,7 @@ func UnpackCellID128(cellID CellID128) (facet uint8, res uint8, path []uint8, er
 }
 
 // Child returns the nth child cell (0..8) at the next resolution level (res + 1).
-// Operates purely bitwise without allocating slices.
+// Operates purely bitwise across High and Low uint64 words.
 func (id CellID128) Child(subCellIdx uint8) (CellID128, error) {
 	if subCellIdx > 8 {
 		return CellID128{}, fmt.Errorf("invalid sub-cell index %d: must be 0..8", subCellIdx)
@@ -326,35 +334,46 @@ func (id CellID128) Child(subCellIdx uint8) (CellID128, error) {
 
 	nextRes := res + 1
 
-	child := CellID128{
-		High: id.High,
-		Low:  id.Low,
-	}
-
-	// mask out top 8 header bits (bits 63..56) while preserving all 56 path bits
-	const pathMask = uint64(0x00FFFFFFFFFFFFFF)
-
-	// update resolution header in high word
 	facetBits := (uint64(id.Facet()) & FacetMask) << FacetShift
 	resBits := (uint64(nextRes) & ResMask) << ResShift
-	child.High = (child.High & pathMask) | facetBits | resBits
 
-	// insert new 4-bit nibble at current level `res`
-	nibble := (uint64(subCellIdx) & SubCellMask)
+	var newHigh, newLow uint64
 
 	if res < 14 {
-		// level falls in high word (levels 1..14)
-		// level 1 (res=0) -> shift 52 (bits 55..52)
-		// level 14 (res=13) -> shift 0 (bits 3..0)
+		// new digit goes into High uint64
 		shift := 52 - (res * 4)
-		child.High |= (nibble << shift)
+
+		var highPathMask uint64
+		if res > 0 {
+			unusedBits := (14 - res) * 4
+			highPathMask = (uint64(0x00FFFFFFFFFFFFFF) >> unusedBits) << unusedBits
+		}
+
+		existingHighPath := id.High & highPathMask
+		newNibble := (uint64(subCellIdx) & SubCellMask) << shift
+
+		newHigh = facetBits | resBits | existingHighPath | newNibble
+		newLow = 0 // Low is guaranteed empty for levels <= 14
+
 	} else {
-		// level falls in Low word (levels 15..30)
-		// level 15 (res=14) -> shift 60 (bits 63..60)
-		// level 30 (res=29) -> shift 0 (bits 3..0)
+		// High word is already fully populated at Level 14; update resolution header
+		existingHighPath := id.High & 0x00FFFFFFFFFFFFFF
+		newHigh = facetBits | resBits | existingHighPath
+
+		// new digit goes into Low uint64
 		shift := 60 - ((res - 14) * 4)
-		child.Low |= (nibble << shift)
+
+		var lowPathMask uint64
+		if res > 14 {
+			unusedBits := (29 - res) * 4
+			lowPathMask = (uint64(0xFFFFFFFFFFFFFFFF) >> unusedBits) << unusedBits
+		}
+
+		existingLowPath := id.Low & lowPathMask
+		newNibble := (uint64(subCellIdx) & SubCellMask) << shift
+
+		newLow = existingLowPath | newNibble
 	}
 
-	return child, nil
+	return CellID128{High: newHigh, Low: newLow}, nil
 }
