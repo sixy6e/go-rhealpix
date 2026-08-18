@@ -138,7 +138,7 @@ func ExportCellsToGeoJSON(el *rhealpix.Ellipsoid, cells []rhealpix.CellID64, out
 		return fmt.Errorf("failed writing file %s: %w", outputPath, err)
 	}
 
-	fmt.Printf("Exported %d compacted cells to %s\n", len(cells), outputPath)
+	// fmt.Printf("Exported %d compacted cells to %s\n", len(cells), outputPath)
 	return nil
 }
 
@@ -183,6 +183,6 @@ func ExportCellsToGeoJSON128(el *rhealpix.Ellipsoid, cells []rhealpix.CellID128,
 		return fmt.Errorf("failed writing file %s: %w", outputPath, err)
 	}
 
-	fmt.Printf("Exported %d compacted 128-bit cells to %s\n", len(cells), outputPath)
+	// fmt.Printf("Exported %d compacted 128-bit cells to %s\n", len(cells), outputPath)
 	return nil
 }
