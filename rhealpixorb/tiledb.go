@@ -449,3 +449,47 @@ func STACGeometryToTileDBRanges128(
 	// consolidate adjacent and near adjacent 1D ranges using DefaultQueryMaxGap
 	return MergeRangesWithGap128(ranges, DefaultQueryMaxGap), nil
 }
+
+// STACGeometryToCompactedCells decomposes a GeoJSON geometry into a solid,
+// hierarchically compacted set of rHEALPix cell IDs down to targetRes using
+// 64 bit cell construction.
+func STACGeometryToCompactedCells(
+	el *rhealpix.Ellipsoid,
+	geom geojson.Geometry,
+	targetRes uint8,
+) ([]rhealpix.CellID64, error) {
+	g := geom.Geometry()
+	if g == nil {
+		return nil, fmt.Errorf("geometry is nil")
+	}
+
+	// run top-down planar decomposition and compaction
+	compactedCells, err := STACGeometryToTileDBRangesTopDown(el, g, targetRes)
+	if err != nil {
+		return nil, fmt.Errorf("failed top down geometry decomposition: %w", err)
+	}
+
+	return compactedCells, nil
+}
+
+// STACGeometryToCompactedCells128 decomposes a GeoJSON geometry into a solid,
+// hierarchically compacted set of rHEALPix cell IDs down to targetRes using
+// 128 bit cell construction.
+func STACGeometryToCompactedCells128(
+	el *rhealpix.Ellipsoid,
+	geom geojson.Geometry,
+	targetRes uint8,
+) ([]rhealpix.CellID128, error) {
+	g := geom.Geometry()
+	if g == nil {
+		return nil, fmt.Errorf("geometry is nil")
+	}
+
+	// run top-down planar decomposition and compaction
+	compactedCells, err := STACGeometryToTileDBRangesTopDown128(el, g, targetRes)
+	if err != nil {
+		return nil, fmt.Errorf("failed top down geometry decomposition: %w", err)
+	}
+
+	return compactedCells, nil
+}
