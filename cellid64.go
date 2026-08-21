@@ -11,6 +11,13 @@ const MaxResolution64 uint8 = 14
 //   - Bits 61..63 (3 bits): Base Facet (0..5)
 //   - Bits 56..60 (5 bits): Resolution Depth (0..14)
 //   - Bits 0..55  (56 bits): Levels 1..14 Sub-cells (14 x 4-bit nibbles: 0..8)
+//
+// Horizonal layout:
+// 63          61 60           56 55                           0
+// +--------------+---------------+-----------------------------+
+// | Base Facet   | Resolution    |   14 sub-cells (4 bits ea) |
+// |   3 bits     |   5 bits      |        56 bits total       |
+// +--------------+---------------+-----------------------------+
 type CellID64 uint64
 
 // PackCellID64 builds a CellID64 from facet, resolution depth, and sub-cell path slice.
