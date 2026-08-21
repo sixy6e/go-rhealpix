@@ -248,3 +248,39 @@ func (id CellID64) Child(subCellIdx uint8) (CellID64, error) {
 
 	return CellID64(facetBits | resBits | existingPathBits | newNibbleBit), nil
 }
+
+// FirstChild returns the numerically lowest descendant cell ID at targetLevel
+// aka Cell Index 0 (top-left child).
+func (id CellID64) FirstChild(targetLevel uint8) (CellID64, error) {
+	if targetLevel < id.Resolution() {
+		return 0, fmt.Errorf("target level %d is coarser than current level %d", targetLevel, id.Resolution())
+	}
+	minBound, _ := id.SubtreeRange(targetLevel)
+	return minBound, nil
+}
+
+// LastChild returns the numerically highest descendant cell ID at targetLevel
+// aka Cell Index 8 (bottom-right child).
+func (id CellID64) LastChild(targetLevel uint8) (CellID64, error) {
+	if targetLevel < id.Resolution() {
+		return 0, fmt.Errorf("target level %d is coarser than current level %d", targetLevel, id.Resolution())
+	}
+	_, maxBound := id.SubtreeRange(targetLevel)
+	return maxBound, nil
+}
+
+// Ancestors returns all parent cell IDs from Level 0 up to (Resolution - 1).
+func (id CellID64) Ancestors() ([]CellID64, error) {
+	currRes := id.Resolution()
+	ancestors := make([]CellID64, 0, currRes)
+
+	for r := uint8(0); r < currRes; r++ {
+		p, err := id.Parent(r)
+		if err != nil {
+			return nil, fmt.Errorf("failed getting ancestor at res %d: %w", r, err)
+		}
+		ancestors = append(ancestors, p)
+	}
+
+	return ancestors, nil
+}
