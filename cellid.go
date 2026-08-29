@@ -70,6 +70,7 @@ type Cell[T any] interface {
 	Resolution() uint8
 	IsZero() bool
 	Parent(targetLevel uint8) (T, error)
+	String() string
 }
 
 // SubtreeRanger is an optional interface implemented by cell IDs that support
