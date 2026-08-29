@@ -4,6 +4,10 @@ import "fmt"
 
 const MaxResolution128 uint8 = 30
 
+// compile-time interface checks
+var _ Cell[CellID128] = CellID128{}
+var _ fmt.Stringer = CellID128{}
+
 // CellID128 represents a 128-bit bit-packed rHEALPix cell identifier.
 // Supports resolution levels 0 through 30 (~sub-millimeter global accuracy).
 //

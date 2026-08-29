@@ -4,6 +4,10 @@ import "fmt"
 
 const MaxResolution64 uint8 = 14
 
+// Compile-time interface checks
+var _ Cell[CellID64] = CellID64(0)
+var _ fmt.Stringer = CellID64(0)
+
 // CellID64 represents a 64-bit bit-packed rHEALPix cell identifier.
 // Supports resolution levels 0 through 14 (~100m–1km global accuracy).
 //
