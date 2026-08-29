@@ -14,6 +14,15 @@ import (
 // Facet 5: South Pole S
 var RootFacetChars = [6]byte{'N', 'O', 'P', 'Q', 'R', 'S'}
 
+// BaseFacetStrings returns RootFacetChars as a slice of 1-character strings.
+func BaseFacetStrings() []string {
+	facets := make([]string, len(RootFacetChars))
+	for i, b := range RootFacetChars {
+		facets[i] = string(b)
+	}
+	return facets
+}
+
 // --- CellID64 Encoding & Decoding ---
 // String returns the canonical string representation of CellID64 (e.g., "Q012", "N").
 // Implements fmt.Stringer.
