@@ -14,18 +14,21 @@ type PlanarBox struct {
 }
 
 // Subdivide3x3 splits a PlanarBox into a 3x3 grid of 9 child boxes matching the rHEALPix child order (0..8).
+// Uses exact fraction multiplication to prevent floating-point boundary drift at high resolutions.
 func (pb PlanarBox) Subdivide3x3() [9]PlanarBox {
 	var children [9]PlanarBox
-	dx := (pb.MaxX - pb.MinX) / 3.0
-	dy := (pb.MaxY - pb.MinY) / 3.0
+	spanX := pb.MaxX - pb.MinX
+	spanY := pb.MaxY - pb.MinY
 
 	idx := 0
 	for row := 0; row < 3; row++ { // top-to-bottom row ordering
-		y0 := pb.MinY + float64(row)*dy
-		y1 := y0 + dy
+		y0 := pb.MinY + (float64(row) * spanY / 3.0)
+		y1 := pb.MinY + (float64(row+1) * spanY / 3.0)
+
 		for col := 0; col < 3; col++ { // left-to-right column ordering
-			x0 := pb.MinX + float64(col)*dx
-			x1 := x0 + dx
+			x0 := pb.MinX + (float64(col) * spanX / 3.0)
+			x1 := pb.MinX + (float64(col+1) * spanX / 3.0)
+
 			children[idx] = PlanarBox{MinX: x0, MaxX: x1, MinY: y0, MaxY: y1}
 			idx++
 		}
@@ -266,13 +269,11 @@ func intersectsAnySegment(segments []PlanarSegment, box PlanarBox) bool {
 	for i := range segments {
 		seg := &segments[i]
 
-		// AABB overlap check (pre-filter)
 		if seg.MaxX < box.MinX || seg.MinX > box.MaxX ||
 			seg.MaxY < box.MinY || seg.MinY > box.MaxY {
 			continue
 		}
 
-		// exact segment-box intersection check
 		if segmentIntersectsBox(seg.P1, seg.P2, box) {
 			return true
 		}
@@ -281,27 +282,34 @@ func intersectsAnySegment(segments []PlanarSegment, box PlanarBox) bool {
 }
 
 // projectGeometryToPlanar maps a WGS84 geometry to normalised [0, 1] x [0, 1] facet local planar space.
-func projectGeometryToPlanar(el *rhealpix.Ellipsoid, facetID uint8, geom orb.Geometry) orb.Polygon {
+func projectGeometryToPlanar(el *rhealpix.Ellipsoid, facetID uint8, geom orb.Geometry) orb.Geometry {
 	if geom == nil {
 		return nil
 	}
 
 	switch g := geom.(type) {
 	case orb.Polygon:
-		return projectPolygonToPlanar(el, facetID, g)
+		proj := projectPolygonToPlanar(el, facetID, g)
+		return ensurePolygonCCW(proj)
 	case orb.MultiPolygon:
-		var merged orb.Polygon
+		var mp orb.MultiPolygon
 		for _, poly := range g {
-			projected := projectPolygonToPlanar(el, facetID, poly)
-			merged = append(merged, projected...)
+			proj := projectPolygonToPlanar(el, facetID, poly)
+			ccw := ensurePolygonCCW(proj)
+			if len(ccw) > 0 {
+				mp = append(mp, ccw)
+			}
 		}
-		return merged
+		if len(mp) == 1 {
+			return mp[0]
+		}
+		return mp
 	default:
 		return nil
 	}
 }
 
-// projectGeometryToPlanar maps a WGS84 geometry to normalised [0, 1] x [0, 1] facet local planar space.
+// projectPolygonToPlanar maps a WGS84 polygon to normalised [0, 1] x [0, 1] facet local planar space.
 func projectPolygonToPlanar(el *rhealpix.Ellipsoid, facetID uint8, poly orb.Polygon) orb.Polygon {
 	projected := make(orb.Polygon, len(poly))
 
@@ -389,7 +397,6 @@ func STACGeometryToTileDBRangesTopDown(
 
 	// pre-allocate rawCells slice capacity (128 entries) to avoid dynamic growth allocations
 	rawCells := make([]rhealpix.CellID64, 0, 128)
-
 	rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
 
 	for _, sub := range facetSubGeoms {
@@ -398,12 +405,12 @@ func STACGeometryToTileDBRangesTopDown(
 			return nil, err
 		}
 
-		planarPoly := projectGeometryToPlanar(el, sub.FacetID, sub.Geometry)
-		if planarPoly == nil {
+		planarGeom := projectGeometryToPlanar(el, sub.FacetID, sub.Geometry)
+		if planarGeom == nil {
 			continue
 		}
 
-		prep := NewPreparedGeometry(planarPoly)
+		prep := NewPreparedGeometry(planarGeom)
 		rawCells = WalkPlanarCell(rootCell, rootBox, prep, targetRes, rawCells)
 	}
 
@@ -480,7 +487,6 @@ func STACGeometryToTileDBRangesTopDown128(
 
 	// pre-allocate rawCells slice capacity (128 entries) to avoid dynamic growth allocations
 	rawCells := make([]rhealpix.CellID128, 0, 128)
-
 	rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
 
 	for _, sub := range facetSubGeoms {
@@ -489,12 +495,12 @@ func STACGeometryToTileDBRangesTopDown128(
 			return nil, err
 		}
 
-		planarPoly := projectGeometryToPlanar(el, sub.FacetID, sub.Geometry)
-		if planarPoly == nil {
+		planarGeom := projectGeometryToPlanar(el, sub.FacetID, sub.Geometry)
+		if planarGeom == nil {
 			continue
 		}
 
-		prep := NewPreparedGeometry(planarPoly)
+		prep := NewPreparedGeometry(planarGeom)
 		rawCells = WalkPlanarCell128(rootCell, rootBox, prep, targetRes, rawCells)
 	}
 
