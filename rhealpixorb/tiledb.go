@@ -74,29 +74,35 @@ func BoundingBoxToTileDBRanges(el *rhealpix.Ellipsoid, bound orb.Bound, targetRe
 		return MergeRangesWithGap(append(r1, r2...), DefaultQueryMaxGap), nil
 	}
 
-	var ranges []Uint64Range
-
-	// decompose across base facets (0..5)
-	for facet := uint8(0); facet < 6; facet++ {
-		rootCell, err := rhealpix.PackCellID64(facet, 0, nil)
-		if err != nil {
-			continue
-		}
-
-		// check base facet envelope first; skip if non-overlapping
-		rootBound, err := Cell64ToBound(el, rootCell)
-		if err == nil && !boundsIntersect(rootBound, bound) {
-			continue
-		}
-
-		decomposeCell(el, rootCell, bound, targetRes, &ranges)
+	// construct closed polygon representation of bounding box
+	poly := orb.Polygon{
+		orb.Ring{
+			bound.Min,
+			{bound.Max.X(), bound.Min.Y()},
+			bound.Max,
+			{bound.Min.X(), bound.Max.Y()},
+			bound.Min,
+		},
 	}
 
-	if len(ranges) == 0 {
+	compacted, err := STACGeometryToTileDBRangesTopDown(el, poly, targetRes)
+	if err != nil {
+		return nil, fmt.Errorf("failed bounding box decomposition: %w", err)
+	}
+
+	if len(compacted) == 0 {
 		return nil, nil
 	}
 
-	// consolidate adjacent or near-adjacent intervals
+	ranges := make([]Uint64Range, 0, len(compacted))
+	for _, c := range compacted {
+		minCell, maxCell := c.SubtreeRange(targetRes)
+		ranges = append(ranges, Uint64Range{
+			Min: uint64(minCell),
+			Max: uint64(maxCell),
+		})
+	}
+
 	return MergeRangesWithGap(ranges, DefaultQueryMaxGap), nil
 }
 
@@ -126,40 +132,25 @@ func BoundingBoxToTileDBRanges128(el *rhealpix.Ellipsoid, bound orb.Bound, targe
 		return MergeRanges128(append(r1, r2...)), nil
 	}
 
-	// extract 4 corners of the bounding box
-	corners := []orb.Point{
-		bound.Min,
-		{bound.Max.X(), bound.Min.Y()},
-		bound.Max,
-		{bound.Min.X(), bound.Max.Y()},
+	poly := orb.Polygon{
+		orb.Ring{
+			bound.Min,
+			{bound.Max.X(), bound.Min.Y()},
+			bound.Max,
+			{bound.Min.X(), bound.Max.Y()},
+			bound.Min,
+		},
 	}
 
-	// sample dense points along the edges
-	sampledPoints := densifyBoundEdges(corners, 10)
-
-	// forward project all points to CellID128 at targetRes
-	cellMap := make(map[rhealpix.CellID128]bool)
-	for _, pt := range sampledPoints {
-		cell, err := rhealpix.ForwardTransform128(el, pt.X(), pt.Y(), targetRes)
-		if err != nil {
-			return nil, fmt.Errorf("failed forward project 128 (%f, %f): %w", pt.X(), pt.Y(), err)
-		}
-		cellMap[cell] = true
-	}
-
-	// extract slice for compacting
-	rawCells := make([]rhealpix.CellID128, 0, len(cellMap))
-	for c := range cellMap {
-		rawCells = append(rawCells, c)
-	}
-
-	// compact the cell set using generic Compact[CellID128]
-	compacted, err := rhealpix.Compact(rawCells)
+	compacted, err := STACGeometryToTileDBRangesTopDown128(el, poly, targetRes)
 	if err != nil {
-		compacted = rawCells
+		return nil, fmt.Errorf("failed 128-bit bounding box decomposition: %w", err)
 	}
 
-	// convert each compacted cell into a 128-bit SubtreeRange [Min, Max]
+	if len(compacted) == 0 {
+		return nil, nil
+	}
+
 	ranges := make([]Uint128Range, 0, len(compacted))
 	for _, c := range compacted {
 		minCell, maxCell := c.SubtreeRange(targetRes)
@@ -277,41 +268,12 @@ func MergeRangesWithGap(ranges []Uint64Range, maxGap uint64) []Uint64Range {
 	return merged
 }
 
-// compare128 returns -1 if a < b, 0 if a == b, and 1 if a > b.
-func compare128(aHigh, aLow, bHigh, bLow uint64) int {
-	if aHigh < bHigh {
-		return -1
-	}
-	if aHigh > bHigh {
-		return 1
-	}
-	if aLow < bLow {
-		return -1
-	}
-	if aLow > bLow {
-		return 1
-	}
-	return 0
-}
-
-// add128 adds maxGap to a 128-bit integer (high, low), properly handling carry across words.
-func add128(high, low, gap uint64) (outHigh, outLow uint64) {
-	outLow = low + gap
-	outHigh = high
-	if outLow < low { // Overflow occurred in Low word
-		outHigh++
-	}
-	return outHigh, outLow
-}
-
 // MergeRanges128 sorts and merges strictly overlapping or contiguous 128-bit ranges (maxGap = 1).
 func MergeRanges128(ranges []Uint128Range) []Uint128Range {
 	return MergeRangesWithGap128(ranges, 1)
 }
 
 // MergeRangesWithGap128 sorts and merges overlapping or near-adjacent Uint128Ranges.
-// Combines ranges if the gap between current.Max and next.Min is <= maxGap,
-// provided both ranges share the exact same top-level SUID geographic trunk and resolution header.
 func MergeRangesWithGap128(ranges []Uint128Range, maxGap uint64) []Uint128Range {
 	if len(ranges) <= 1 {
 		return ranges
@@ -347,7 +309,6 @@ func MergeRangesWithGap128(ranges []Uint128Range, maxGap uint64) []Uint128Range 
 				reachHigh = current.MaxHigh + 1
 				reachLow = maxGap - (math.MaxUint64 - current.MaxLow) - 1
 			} else {
-				// cap at absolute 128-bit limit
 				reachLow = math.MaxUint64
 			}
 		} else {
@@ -402,7 +363,6 @@ func STACGeometryToTileDBRanges(
 	// convert compacted CellID64 elements into 1D Uint64Ranges
 	ranges := make([]Uint64Range, 0, len(compactedCells))
 	for _, c := range compactedCells {
-		// minCell, maxCell := c.SubtreeRangeMax()
 		minCell, maxCell := c.SubtreeRange(targetRes)
 		ranges = append(ranges, Uint64Range{
 			Min: uint64(minCell),
