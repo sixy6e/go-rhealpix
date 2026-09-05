@@ -5,6 +5,16 @@ import (
 	"math"
 )
 
+// NormaliseLongitudeRad normalises any longitude in radians into the canonical [-pi, pi) range.
+func NormaliseLongitudeRad(lonRad float64) float64 {
+	pi := math.Pi
+	lon := math.Mod(lonRad+pi, 2.0*pi)
+	if lon < 0 {
+		lon += 2.0 * pi
+	}
+	return lon - pi
+}
+
 // AuthLat computes authalic latitude (beta in radians) from geodetic latitude (phi in radians).
 func (el *Ellipsoid) AuthLat(phi float64) float64 {
 	sinPhi := math.Sin(phi)
@@ -60,13 +70,7 @@ func ForwardProjectRadians(lonRad, beta float64) (xRhp, yRhp float64) {
 	threeQuarterPi := 3.0 * pi / 4.0
 	phi0 := math.Asin(2.0 / 3.0)
 
-	lon := lonRad
-	for lon < -pi {
-		lon += 2.0 * pi
-	}
-	for lon >= pi {
-		lon -= 2.0 * pi
-	}
+	lon := NormaliseLongitudeRad(lonRad)
 
 	// exact Poles
 	if beta >= halfPi-1e-15 {
@@ -232,14 +236,14 @@ func IdentifyBaseFacet(lonRad, beta float64) (uint8, float64, float64) {
 	pi := math.Pi
 	halfPi := pi / 2.0
 	quarterPi := pi / 4.0
-	threeQuarterPi := 3.0 * pi / 4.0
 
-	xRhp, yRhp := ForwardProjectRadians(lonRad, beta)
+	normLonRad := NormaliseLongitudeRad(lonRad)
+	xRhp, yRhp := ForwardProjectRadians(normLonRad, beta)
 
 	// Facet N
 	if yRhp > quarterPi {
 		xLocal := (xRhp - (-pi)) / halfPi
-		yLocal := (threeQuarterPi - yRhp) / halfPi
+		yLocal := ((3.0 * pi / 4.0) - yRhp) / halfPi
 		return 0, clampUnit(xLocal), clampUnit(yLocal)
 	}
 
@@ -251,25 +255,17 @@ func IdentifyBaseFacet(lonRad, beta float64) (uint8, float64, float64) {
 	}
 
 	// Equatorial Facets (O, P, Q, R)
-	lon := lonRad
-	for lon < -pi {
-		lon += 2.0 * pi
-	}
-	for lon >= pi {
-		lon -= 2.0 * pi
-	}
-
 	var facet uint8
 	var lonMin float64
 
 	switch {
-	case lon < -halfPi: // [-pi, -pi/2) -> Facet O
+	case normLonRad < -halfPi: // [-pi, -pi/2) -> Facet O
 		facet = 1
 		lonMin = -pi
-	case lon < 0.0: // [-pi/2, 0) -> Facet P
+	case normLonRad < 0.0: // [-pi/2, 0) -> Facet P
 		facet = 2
 		lonMin = -halfPi
-	case lon < halfPi: // [0, pi/2) -> Facet Q
+	case normLonRad < halfPi: // [0, pi/2) -> Facet Q
 		facet = 3
 		lonMin = 0.0
 	default: // [pi/2, pi] -> Facet R
@@ -277,7 +273,7 @@ func IdentifyBaseFacet(lonRad, beta float64) (uint8, float64, float64) {
 		lonMin = halfPi
 	}
 
-	xLocal := (lon - lonMin) / halfPi
+	xLocal := (normLonRad - lonMin) / halfPi
 	yLocal := 0.5 * (1.0 - (yRhp / quarterPi))
 
 	return facet, clampUnit(xLocal), clampUnit(yLocal)
@@ -365,10 +361,10 @@ func InverseProjectRadians(xRhp, yRhp float64) (lonRad, beta float64) {
 	var xHp, yHp float64
 
 	if yRhp > quarterPi {
-		// North Polar Region (north_square = 0)
+		// North Polar Region (north_square = 0, at least until configuration is supported)
 		// calculate diagonal bounding lines L1 and L2
-		L1 := xRhp - (-threeQuarterPi - halfPi)  // x - (-5pi/4)
-		L2 := -xRhp + (-threeQuarterPi + halfPi) // -x + (-pi/4)
+		L1 := xRhp - (-threeQuarterPi - halfPi)
+		L2 := -xRhp + (-threeQuarterPi + halfPi)
 
 		var c int
 		if yRhp < L1-eps && yRhp >= L2-eps {
@@ -409,9 +405,9 @@ func InverseProjectRadians(xRhp, yRhp float64) (lonRad, beta float64) {
 		yHp = dy + tcY
 
 	} else if yRhp < -quarterPi {
-		// South Polar Region (south_square = 0)
-		L1 := xRhp - (-threeQuarterPi + halfPi)  // x - (-pi/4)
-		L2 := -xRhp + (-threeQuarterPi - halfPi) // -x + (-5pi/4)
+		// South Polar Region (south_square = 0, at least until configuration is supported)
+		L1 := xRhp - (-threeQuarterPi + halfPi)
+		L2 := -xRhp + (-threeQuarterPi - halfPi)
 
 		var c int
 		if yRhp <= L1+eps && yRhp > L2+eps {
@@ -499,19 +495,11 @@ func InverseProjectRadians(xRhp, yRhp float64) (lonRad, beta float64) {
 		}
 	}
 
-	// normalise longitude to [-pi, pi)
-	for lonRad < -pi {
-		lonRad += 2.0 * pi
-	}
-	for lonRad >= pi {
-		lonRad -= 2.0 * pi
-	}
-
-	return lonRad, beta
+	return NormaliseLongitudeRad(lonRad), beta
 }
 
 // FacetLocalToRadians converts a base facet index (0..5) and local coordinates [0, 1] x [0, 1]
-// (measured from Top-Left / North-West) back to global rHEALPix planar radians.
+// back to global rHEALPix planar radians.
 func FacetLocalToRadians(facet uint8, xLocal, yLocal float64) (xRhp, yRhp float64) {
 	pi := math.Pi
 	halfPi := pi / 2.0
@@ -542,9 +530,44 @@ func FacetLocalToRadians(facet uint8, xLocal, yLocal float64) (xRhp, yRhp float6
 	return xRhp, yRhp
 }
 
+// RadiansToFacetLocal converts global planar radians (xRhp, yRhp)
+// directly into local [0, 1] x [0, 1] coordinates for a specific base facet.
+func RadiansToFacetLocal(facet uint8, xRhp, yRhp float64) (xLocal, yLocal float64) {
+	pi := math.Pi
+	halfPi := pi / 2.0
+	quarterPi := pi / 4.0
+	threeQuarterPi := 3.0 * pi / 4.0
+
+	switch facet {
+	case 0: // Facet N
+		xLocal = (xRhp - (-pi)) / halfPi
+		yLocal = (threeQuarterPi - yRhp) / halfPi
+	case 1: // Facet O
+		xLocal = (xRhp - (-pi)) / halfPi
+		yLocal = (quarterPi - yRhp) / halfPi
+	case 2: // Facet P
+		xLocal = (xRhp - (-halfPi)) / halfPi
+		yLocal = (quarterPi - yRhp) / halfPi
+	case 3: // Facet Q
+		xLocal = (xRhp - 0.0) / halfPi
+		yLocal = (quarterPi - yRhp) / halfPi
+	case 4: // Facet R
+		xLocal = (xRhp - halfPi) / halfPi
+		yLocal = (quarterPi - yRhp) / halfPi
+	case 5: // Facet S
+		xLocal = (xRhp - (-pi)) / halfPi
+		yLocal = (-quarterPi - yRhp) / halfPi
+	}
+
+	return clampUnit(xLocal), clampUnit(yLocal)
+}
+
 // LonLatToPlanar converts geodetic longitude and latitude (in degrees)
-// for a specific base facet (0..5) into normalised local planar coordinates (xLocal, yLocal in [0, 1])
-// measured from the UpperLeft (NorthWest) corner of the facet.
+// specifically FOR the target base facet (0..5), returning normalised local
+// planar coordinates (xLocal, yLocal in [0, 1]) measured from the Upper-Left (NW) corner.
+//
+// Longitudes outside [-180, 180] (unwrapped) are automatically normalised relative
+// to the target facet's domain.
 func LonLatToPlanar(el *Ellipsoid, facetID uint8, lonDeg, latDeg float64) (xLocal, yLocal float64, err error) {
 	if facetID > 5 {
 		return 0, 0, fmt.Errorf("invalid facet ID %d: must be 0..5", facetID)
@@ -553,11 +576,42 @@ func LonLatToPlanar(el *Ellipsoid, facetID uint8, lonDeg, latDeg float64) (xLoca
 	lonRad := lonDeg * (math.Pi / 180.0)
 	latRad := latDeg * (math.Pi / 180.0)
 
-	// compute authalic latitude
+	normLonRad := NormaliseLongitudeRad(lonRad)
 	beta := el.AuthLat(latRad)
 
-	// obtain facet and local planar coordinates [0, 1] x [0, 1]
-	_, xLoc, yLoc := IdentifyBaseFacet(lonRad, beta)
+	pi := math.Pi
+	halfPi := pi / 2.0
 
-	return xLoc, yLoc, nil
+	// Equatorial Facets (O=1, P=2, Q=3, R=4)
+	if facetID >= 1 && facetID <= 4 {
+		var lonMin float64
+		switch facetID {
+		case 1: // Facet O: [-pi, -pi/2)
+			lonMin = -pi
+		case 2: // Facet P: [-pi/2, 0)
+			lonMin = -halfPi
+		case 3: // Facet Q: [0, pi/2)
+			lonMin = 0.0
+		case 4: // Facet R: [pi/2, pi)
+			lonMin = halfPi
+		}
+
+		_, yRhp := ForwardProjectRadians(normLonRad, beta)
+
+		xLocal = (normLonRad - lonMin) / halfPi
+		yLocal = 0.5 * (1.0 - (yRhp / (pi / 4.0)))
+
+		return clampUnit(xLocal), clampUnit(yLocal), nil
+	}
+
+	// Polar Cap Facets (N=0, S=5)
+	detectedFacet, xLoc, yLoc := IdentifyBaseFacet(normLonRad, beta)
+	if detectedFacet == facetID {
+		return xLoc, yLoc, nil
+	}
+
+	xRhp, yRhp := ForwardProjectRadians(normLonRad, beta)
+	xLoc, yLoc = RadiansToFacetLocal(facetID, xRhp, yRhp)
+
+	return clampUnit(xLoc), clampUnit(yLoc), nil
 }
