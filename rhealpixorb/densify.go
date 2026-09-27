@@ -1,6 +1,8 @@
 package rhealpixorb
 
 import (
+	"math"
+
 	"github.com/paulmach/orb"
 	rhealpix "github.com/sixy6e/go-rhealpix"
 )
@@ -12,7 +14,7 @@ func lerp(a, b, t float64) float64 {
 
 // buildDensifiedRing interpolates planar points along valid corner edges in local facet space
 // and projects them to Lon/Lat (EPSG:4326).
-func buildDensifiedRing(el *rhealpix.Ellipsoid, facet uint8, corners [][2]float64, segmentCount int) orb.Ring {
+func buildDensifiedRing(d *rhealpix.RhpDGGS, facet uint8, corners [][2]float64, segmentCount int) orb.Ring {
 	if segmentCount < 1 {
 		segmentCount = 1
 	}
@@ -35,7 +37,7 @@ func buildDensifiedRing(el *rhealpix.Ellipsoid, facet uint8, corners [][2]float6
 			xLocal := lerp(pStart[0], pEnd[0], t)
 			yLocal := lerp(pStart[1], pEnd[1], t)
 
-			lon, lat := facetLocalToLonLat(el, facet, xLocal, yLocal)
+			lon, lat := facetLocalToLonLat(d, facet, xLocal, yLocal)
 			ring = append(ring, orb.Point{lon, lat})
 		}
 	}
@@ -138,6 +140,199 @@ func densifyRingEdges(ring orb.Ring, pointsPerSegment int) []orb.Point {
 
 			densified = append(densified, orb.Point{x, y})
 		}
+	}
+	return densified
+}
+
+// DensifyRingByStep samples intermediate points along a geographic ring's segments
+// ensuring no segment exceeds maxStepDeg (in degrees). It preserves antimeridian wrapping.
+// Similar to densifyRingEdges without the bias of n-points per segment.
+// e.g. short segment and long segment both using the same number of points
+// one being heavily sampled in a short space, and one getting under sampled
+// over a long space.
+func DensifyRingByStep(ring orb.Ring, maxStepDeg float64) orb.Ring {
+	if len(ring) < 2 {
+		return ring
+	}
+	if maxStepDeg <= 0 {
+		maxStepDeg = 0.05 // default ~5km step
+	}
+
+	// estimate capacity
+	densified := make(orb.Ring, 0, len(ring)*2)
+
+	for i := 0; i < len(ring)-1; i++ {
+		p1 := ring[i]
+		p2 := ring[i+1]
+
+		lon1, lat1 := p1.X(), p1.Y()
+		lon2, lat2 := p2.X(), p2.Y()
+
+		// shortest longitude delta across ±180° seam
+		dLon := lon2 - lon1
+		if dLon > 180.0 {
+			dLon -= 360.0
+		} else if dLon < -180.0 {
+			dLon += 360.0
+		}
+		dLat := lat2 - lat1
+
+		// calculate total angular Euclidean step distance in degrees
+		dist := math.Hypot(dLon, dLat)
+
+		// calculate required segment count for this specific edge
+		steps := 1
+		if dist > maxStepDeg {
+			steps = int(math.Ceil(dist / maxStepDeg))
+		}
+
+		for j := 0; j < steps; j++ {
+			t := float64(j) / float64(steps)
+
+			x := lon1 + t*dLon
+			y := lerp(lat1, lat2, t)
+
+			// wrap longitude back into [-180, 180] domain
+			if x > 180.0 {
+				x -= 360.0
+			} else if x < -180.0 {
+				x += 360.0
+			}
+
+			densified = append(densified, orb.Point{x, y})
+		}
+	}
+
+	// always append the final closing point of the original ring
+	if len(ring) > 0 {
+		densified = append(densified, ring[len(ring)-1])
+	}
+
+	return densified
+}
+
+func DensifyAndSplitAtBeta0(d *rhealpix.RhpDGGS, ring orb.Ring, maxStepDeg float64) orb.Ring {
+	if len(ring) < 2 {
+		return ring
+	}
+	if maxStepDeg <= 0 {
+		maxStepDeg = 0.02 // ~2km step size in degrees
+	}
+
+	phi0 := d.GetEllipsoid().Phi0 * rhealpix.RadToDeg // Authalic seam latitude in degrees
+
+	densified := make(orb.Ring, 0, len(ring)*2)
+
+	for i := 0; i < len(ring)-1; i++ {
+		p1 := ring[i]
+		p2 := ring[i+1]
+
+		lon1, lat1 := p1.X(), p1.Y()
+		lon2, lat2 := p2.X(), p2.Y()
+
+		// shortest longitude delta across ±180° antimeridian seam
+		dLon := lon2 - lon1
+		if dLon > 180.0 {
+			dLon -= 360.0
+		} else if dLon < -180.0 {
+			dLon += 360.0
+		}
+		dLat := lat2 - lat1
+
+		// check if the segment crosses the North (+Phi0) or South (-Phi0) seam
+		crossesNorthSeam := (lat1 < phi0 && lat2 > phi0) || (lat1 > phi0 && lat2 < phi0)
+		crossesSouthSeam := (lat1 < -phi0 && lat2 > -phi0) || (lat1 > -phi0 && lat2 < -phi0)
+
+		if crossesNorthSeam || crossesSouthSeam {
+			targetPhi := phi0
+			if crossesSouthSeam {
+				targetPhi = -phi0
+			}
+
+			// linear fraction t where segment intersects targetPhi
+			tSeam := (targetPhi - lat1) / dLat
+			lonSeam := lon1 + tSeam*dLon
+
+			// wrap seam longitude into [-180, 180]
+			if lonSeam > 180.0 {
+				lonSeam -= 360.0
+			} else if lonSeam < -180.0 {
+				lonSeam += 360.0
+			}
+
+			seamPt := orb.Point{lonSeam, targetPhi}
+
+			// Sub-segment 1: p1 -> seamPt (densifySegment includes p1, excludes seamPt)
+			densified = append(densified, densifySegment(p1, seamPt, maxStepDeg)...)
+			// Sub-segment 2: seamPt -> p2 (densifySegment includes seamPt, excludes p2)
+			densified = append(densified, densifySegment(seamPt, p2, maxStepDeg)...)
+			continue
+		}
+
+		// standard segment densification (includes p1, excludes p2)
+		densified = append(densified, densifySegment(p1, p2, maxStepDeg)...)
+	}
+
+	// append the final closing point
+	if len(ring) > 0 {
+		densified = append(densified, ring[len(ring)-1])
+	}
+
+	return densified
+}
+
+// densifySegment interpolates points starting at p1 up to (but not including) p2
+func densifySegment(p1, p2 orb.Point, maxStepDeg float64) []orb.Point {
+	dLon := p2.X() - p1.X()
+	if dLon > 180.0 {
+		dLon -= 360.0
+	} else if dLon < -180.0 {
+		dLon += 360.0
+	}
+	dLat := p2.Y() - p1.Y()
+
+	distDeg := math.Hypot(dLon, dLat)
+	if distDeg < 1e-12 {
+		// ignore zero-length segments to prevent duplicate points
+		return nil
+	}
+
+	steps := 1
+	if distDeg > maxStepDeg {
+		steps = int(math.Ceil(distDeg / maxStepDeg))
+	}
+
+	pts := make([]orb.Point, 0, steps)
+	for s := 0; s < steps; s++ {
+		t := float64(s) / float64(steps)
+		x := p1.X() + t*dLon
+		y := p1.Y() + t*dLat
+
+		if x > 180.0 {
+			x -= 360.0
+		} else if x < -180.0 {
+			x += 360.0
+		}
+
+		pts = append(pts, orb.Point{x, y})
+	}
+	return pts
+}
+
+// redo using new projection workflow
+// densifyRing inserts intermediate vertices on segments longer than maxStepDeg
+func densifyRing(ring orb.Ring, maxStepDeg float64) orb.Ring {
+	if len(ring) < 2 {
+		return ring
+	}
+
+	densified := make(orb.Ring, 0, len(ring)*2)
+	for i := 0; i < len(ring)-1; i++ {
+		p1, p2 := ring[i], ring[i+1]
+		densified = append(densified, densifySegment(p1, p2, maxStepDeg)...)
+	}
+	if len(ring) > 0 {
+		densified = append(densified, ring[len(ring)-1])
 	}
 	return densified
 }

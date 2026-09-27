@@ -51,7 +51,7 @@ func (r Uint128Range) MaxCell() rhealpix.CellID128 {
 // BoundingBoxToTileDBRanges translates a WGS84 geographic bounding box
 // into a set of 1D uint64 ranges using top down spatial tree decomposition.
 // Safely handles bounding boxes that cross the 180° Antimeridian.
-func BoundingBoxToTileDBRanges(el *rhealpix.Ellipsoid, bound orb.Bound, targetRes uint8) ([]Uint64Range, error) {
+func BoundingBoxToTileDBRanges(d *rhealpix.RhpDGGS, bound orb.Bound, targetRes uint8) ([]Uint64Range, error) {
 	// handle antimeridian crossing (Min.X > Max.X) by splitting into two bounds (East and West boxes)
 	if bound.Min.X() > bound.Max.X() {
 		b1 := orb.Bound{
@@ -63,11 +63,11 @@ func BoundingBoxToTileDBRanges(el *rhealpix.Ellipsoid, bound orb.Bound, targetRe
 			Max: orb.Point{bound.Max.X(), bound.Max.Y()},
 		}
 
-		r1, err := BoundingBoxToTileDBRanges(el, b1, targetRes)
+		r1, err := BoundingBoxToTileDBRanges(d, b1, targetRes)
 		if err != nil {
 			return nil, err
 		}
-		r2, err := BoundingBoxToTileDBRanges(el, b2, targetRes)
+		r2, err := BoundingBoxToTileDBRanges(d, b2, targetRes)
 		if err != nil {
 			return nil, err
 		}
@@ -85,7 +85,7 @@ func BoundingBoxToTileDBRanges(el *rhealpix.Ellipsoid, bound orb.Bound, targetRe
 		},
 	}
 
-	compacted, err := STACGeometryToTileDBRangesTopDown(el, poly, targetRes)
+	compacted, err := STACGeometryToTileDBRangesTopDown(d, poly, targetRes)
 	if err != nil {
 		return nil, fmt.Errorf("failed bounding box decomposition: %w", err)
 	}
@@ -109,7 +109,7 @@ func BoundingBoxToTileDBRanges(el *rhealpix.Ellipsoid, bound orb.Bound, targetRe
 // BoundingBoxToTileDBRanges128 translates a WGS84 geographic bounding box
 // into a set of 128-bit compound ranges suitable for high-resolution TileDB queries.
 // Safely handles bounding boxes that cross the 180° Antimeridian.
-func BoundingBoxToTileDBRanges128(el *rhealpix.Ellipsoid, bound orb.Bound, targetRes uint8) ([]Uint128Range, error) {
+func BoundingBoxToTileDBRanges128(d *rhealpix.RhpDGGS, bound orb.Bound, targetRes uint8) ([]Uint128Range, error) {
 	// handle antimeridian crossing (Min.X > Max.X) by splitting into two bounds (East and West boxes)
 	if bound.Min.X() > bound.Max.X() {
 		b1 := orb.Bound{
@@ -121,11 +121,11 @@ func BoundingBoxToTileDBRanges128(el *rhealpix.Ellipsoid, bound orb.Bound, targe
 			Max: orb.Point{bound.Max.X(), bound.Max.Y()},
 		}
 
-		r1, err := BoundingBoxToTileDBRanges128(el, b1, targetRes)
+		r1, err := BoundingBoxToTileDBRanges128(d, b1, targetRes)
 		if err != nil {
 			return nil, err
 		}
-		r2, err := BoundingBoxToTileDBRanges128(el, b2, targetRes)
+		r2, err := BoundingBoxToTileDBRanges128(d, b2, targetRes)
 		if err != nil {
 			return nil, err
 		}
@@ -142,7 +142,7 @@ func BoundingBoxToTileDBRanges128(el *rhealpix.Ellipsoid, bound orb.Bound, targe
 		},
 	}
 
-	compacted, err := STACGeometryToTileDBRangesTopDown128(el, poly, targetRes)
+	compacted, err := STACGeometryToTileDBRangesTopDown128(d, poly, targetRes)
 	if err != nil {
 		return nil, fmt.Errorf("failed 128-bit bounding box decomposition: %w", err)
 	}
@@ -340,7 +340,7 @@ func MergeRangesWithGap128(ranges []Uint128Range, maxGap uint64) []Uint128Range 
 // hierarchically compacted set of 1D TileDB ranges using top down planar decomposition.
 // The approach of top down planar decomposition and compaction, is similar to Uber's H3 PolyFill.
 func STACGeometryToTileDBRanges(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	geom geojson.Geometry,
 	targetRes uint8,
 ) ([]Uint64Range, error) {
@@ -351,7 +351,7 @@ func STACGeometryToTileDBRanges(
 	}
 
 	// run top down planar decomposition and compaction
-	compactedCells, err := STACGeometryToTileDBRangesTopDown(el, g, targetRes)
+	compactedCells, err := STACGeometryToTileDBRangesTopDown(d, g, targetRes)
 	if err != nil {
 		return nil, fmt.Errorf("failed top down geometry decomposition: %w", err)
 	}
@@ -378,7 +378,7 @@ func STACGeometryToTileDBRanges(
 // hierarchically compacted set of 1D TileDB ranges using top down planar decomposition.
 // The approach of top down planar decomposition and compaction, is similar to Uber's H3 PolyFill.
 func STACGeometryToTileDBRanges128(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	geom geojson.Geometry,
 	targetRes uint8,
 ) ([]Uint128Range, error) {
@@ -389,7 +389,7 @@ func STACGeometryToTileDBRanges128(
 	}
 
 	// run top down planar decomposition and compaction
-	compactedCells, err := STACGeometryToTileDBRangesTopDown128(el, g, targetRes)
+	compactedCells, err := STACGeometryToTileDBRangesTopDown128(d, g, targetRes)
 	if err != nil {
 		return nil, fmt.Errorf("failed top down geometry decomposition: %w", err)
 	}
@@ -414,7 +414,7 @@ func STACGeometryToTileDBRanges128(
 // hierarchically compacted set of rHEALPix cell IDs down to targetRes using
 // 64 bit cell construction.
 func STACGeometryToCompactedCells(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	geom geojson.Geometry,
 	targetRes uint8,
 ) ([]rhealpix.CellID64, error) {
@@ -424,7 +424,8 @@ func STACGeometryToCompactedCells(
 	}
 
 	// run top-down planar decomposition and compaction
-	compactedCells, err := STACGeometryToTileDBRangesTopDown(el, g, targetRes)
+	// compactedCells, err := STACGeometryToTileDBRangesTopDown(d, g, targetRes)
+	compactedCells, err := STACGeometryToTileDBRangesTopDown2(d, g, targetRes)
 	if err != nil {
 		return nil, fmt.Errorf("failed top down geometry decomposition: %w", err)
 	}
@@ -436,7 +437,7 @@ func STACGeometryToCompactedCells(
 // hierarchically compacted set of rHEALPix cell IDs down to targetRes using
 // 128 bit cell construction.
 func STACGeometryToCompactedCells128(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	geom geojson.Geometry,
 	targetRes uint8,
 ) ([]rhealpix.CellID128, error) {
@@ -446,10 +447,37 @@ func STACGeometryToCompactedCells128(
 	}
 
 	// run top-down planar decomposition and compaction
-	compactedCells, err := STACGeometryToTileDBRangesTopDown128(el, g, targetRes)
+	compactedCells, err := STACGeometryToTileDBRangesTopDown128(d, g, targetRes)
 	if err != nil {
 		return nil, fmt.Errorf("failed top down geometry decomposition: %w", err)
 	}
 
 	return compactedCells, nil
+}
+
+// compare128 returns -1 if a < b, 0 if a == b, and 1 if a > b.
+func compare128(aHigh, aLow, bHigh, bLow uint64) int {
+	if aHigh < bHigh {
+		return -1
+	}
+	if aHigh > bHigh {
+		return 1
+	}
+	if aLow < bLow {
+		return -1
+	}
+	if aLow > bLow {
+		return 1
+	}
+	return 0
+}
+
+// add128 adds maxGap to a 128-bit integer (high, low), properly handling carry across words.
+func add128(high, low, gap uint64) (outHigh, outLow uint64) {
+	outLow = low + gap
+	outHigh = high
+	if outLow < low { // Overflow occurred in Low word
+		outHigh++
+	}
+	return outHigh, outLow
 }

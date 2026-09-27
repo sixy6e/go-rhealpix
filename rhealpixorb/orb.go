@@ -2,7 +2,6 @@ package rhealpixorb
 
 import (
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 
@@ -10,219 +9,201 @@ import (
 	rhealpix "github.com/sixy6e/go-rhealpix"
 )
 
-// Cell64ToPolygon converts a CellID64 into an orb.Polygon in WGS84 coordinates.
-// It handles polar shape classification (Quads, Caps, Darts, and Skew Quads),
-// applying vertex re-ordering and dart trimming for clean GIS geometries.
-//
-// segmentCount defines how many linear sub-segments to create per cell edge.
-// Use segmentCount = 1 for standard 4-corner polygons, or segmentCount = 8..16
-func Cell64ToPolygon(el *rhealpix.Ellipsoid, id rhealpix.CellID64, segmentCount int) (orb.Polygon, error) {
-	if id.IsZero() {
-		return nil, fmt.Errorf("zero cell ID")
-	}
-
-	facet := id.Facet()
-	shape := rhealpix.CellShape64(id)
-
-	// calculate local planar square extent [xMin, xMax], [yMin, yMax] in [0, 1]
-	xMin, xMax, yMin, yMax := cellPlanarExtent64(id)
-
-	// initial planar corner vertices: UL, UR, LR, LL
-	planarCorners := [4][2]float64{
-		{xMin, yMax}, // 0: Top-Left (UL)
-		{xMax, yMax}, // 1: Top-Right (UR)
-		{xMax, yMin}, // 2: Bottom-Right (LR)
-		{xMin, yMin}, // 3: Bottom-Left (LL)
-	}
-
-	// re-order planar vertices for topological alignment (Skew Quads & Darts)
-	// essentially move index 0 so it aligns to geographic NW
-	alignedCorners := alignVertices(planarCorners, shape, facet)
-
-	// extract valid non-collapsed vertices
-	validCorners := make([][2]float64, 0, 4)
-	for i, pt := range alignedCorners {
-		// trim degenerate seam vertex ONLY on true Darts:
-		// North Facet (0): pop index 2
-		// South Facet (5): pop index 1
-		if shape == rhealpix.ShapeDart {
-			if (facet == 0 && i == 2) || (facet == 5 && i == 1) {
-				continue
-			}
-		}
-		validCorners = append(validCorners, pt)
-	}
-
-	// construct ring with edge densification in planar space, then project to WGS84
-	ring := buildDensifiedRing(el, facet, validCorners, segmentCount)
-	return orb.Polygon{ring}, nil
-}
-
-// Cell128ToPolygon converts a CellID128 into an orb.Polygon with polar shape handling.
-func Cell128ToPolygon(el *rhealpix.Ellipsoid, id rhealpix.CellID128, segmentCount int) (orb.Polygon, error) {
-	if id.IsZero() {
-		return nil, fmt.Errorf("zero cell ID")
-	}
-
-	facet := id.Facet()
-	shape := rhealpix.CellShape128(id)
-
-	xMin, xMax, yMin, yMax := cellPlanarExtent128(id)
-	// width := xMax - xMin
-
-	planarCorners := [4][2]float64{
-		{xMin, yMax},
-		{xMax, yMax},
-		{xMax, yMin},
-		{xMin, yMin},
-	}
-
-	alignedCorners := alignVertices(planarCorners, shape, facet)
-
-	validCorners := make([][2]float64, 0, 4)
-	for i, pt := range alignedCorners {
-		if shape == rhealpix.ShapeDart {
-			if (facet == 0 && i == 2) || (facet == 5 && i == 1) {
-				continue
-			}
-		}
-		validCorners = append(validCorners, pt)
-	}
-
-	ring := buildDensifiedRing(el, facet, validCorners, segmentCount)
-	return orb.Polygon{ring}, nil
-}
-
-// CellToPolygon converts any rHEALPix cell (CellID64 or CellID128) into an orb.Polygon.
-func CellToPolygon[T rhealpix.CellID64 | rhealpix.CellID128](el *rhealpix.Ellipsoid, id T, segmentCount int) (orb.Polygon, error) {
-	switch cell := any(id).(type) {
+// CellToPolygon converts any rHEALPix cell (CellID64 or CellID128) into a closed orb.Polygon in geodetic coordinates.
+// If segmentCount <= 1, it returns the fundamental cell boundary (3 points for Dart, 4 points for Quad/Cap/SkewQuad).
+// If segmentCount > 1, it densifies each cell edge into segmentCount linear steps in geographic space.
+func CellToPolygon[T rhealpix.CellID](d *rhealpix.RhpDGGS, id T, segmentCount int) (orb.Polygon, error) {
+	var isZero bool
+	switch v := any(id).(type) {
 	case rhealpix.CellID64:
-		return Cell64ToPolygon(el, cell, segmentCount)
+		isZero = v.IsZero()
 	case rhealpix.CellID128:
-		return Cell128ToPolygon(el, cell, segmentCount)
-	default:
-		return nil, fmt.Errorf("unsupported cell ID type")
+		isZero = v.IsZero()
 	}
+
+	if isZero {
+		return nil, fmt.Errorf("zero cell ID")
+	}
+
+	// retrieve topologically aligned, GIS-valid vertices starting at true NW (Dart trimmed to 3 points)
+	var vertices [][2]float64
+	var err error
+
+	switch v := any(id).(type) {
+	case rhealpix.CellID64:
+		vertices, err = d.GeographicVertices64(v)
+	case rhealpix.CellID128:
+		vertices, err = d.GeographicVertices128(v)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute geographic vertices: %w", err)
+	}
+
+	numVerts := len(vertices)
+	if numVerts == 0 {
+		return nil, fmt.Errorf("empty vertex set returned")
+	}
+
+	// standard non-densified polygon output (segmentCount <= 1)
+	if segmentCount <= 1 {
+		ring := make(orb.Ring, 0, numVerts+1)
+		for _, pt := range vertices {
+			ring = append(ring, orb.Point{pt[0], pt[1]})
+		}
+		// close ring
+		ring = append(ring, ring[0])
+		return orb.Polygon{ring}, nil
+	}
+
+	// densified edge interpolation along authentic topological boundary edges
+	totalPts := numVerts * segmentCount
+	ring := make(orb.Ring, 0, totalPts+1)
+
+	for i := 0; i < numVerts; i++ {
+		start := vertices[i]
+		end := vertices[(i+1)%numVerts]
+
+		lon1, lat1 := start[0], start[1]
+		lon2, lat2 := end[0], end[1]
+
+		// interpolate intermediate points along current boundary edge
+		for j := 0; j < segmentCount; j++ {
+			t := float64(j) / float64(segmentCount)
+			interpLon := lon1 + t*(lon2-lon1)
+			interpLat := lat1 + t*(lat2-lat1)
+			ring = append(ring, orb.Point{interpLon, interpLat})
+		}
+	}
+
+	// close ring for GeoJSON standard compliance
+	ring = append(ring, ring[0])
+
+	return orb.Polygon{ring}, nil
+}
+
+// Cell64ToPolygon is a concrete helper for 64-bit cell IDs.
+func Cell64ToPolygon(d *rhealpix.RhpDGGS, id rhealpix.CellID64, segmentCount int) (orb.Polygon, error) {
+	return CellToPolygon[rhealpix.CellID64](d, id, segmentCount)
+}
+
+// Cell128ToPolygon is a concrete helper for 128-bit cell IDs.
+func Cell128ToPolygon(d *rhealpix.RhpDGGS, id rhealpix.CellID128, segmentCount int) (orb.Polygon, error) {
+	return CellToPolygon[rhealpix.CellID128](d, id, segmentCount)
+}
+
+// Level0FacetBound returns the exact geographic bounding envelope for a Level 0 base facet (0..5).
+func Level0FacetBound(d *rhealpix.RhpDGGS, facet uint8) orb.Bound {
+	bounds := d.MustFacetBounds(facet)
+	capLatDeg := d.GetEllipsoid().Phi0 * rhealpix.RadToDeg
+
+	switch facet {
+	case 0: // Facet N (North Cap covers full lon spectrum down to Phi0)
+		return orb.Bound{Min: orb.Point{-180.0, capLatDeg}, Max: orb.Point{180.0, 90.0}}
+
+	case 5: // Facet S (South Cap covers full lon spectrum up to -Phi0)
+		return orb.Bound{Min: orb.Point{-180.0, -90.0}, Max: orb.Point{180.0, -capLatDeg}}
+
+	default: // Equatorial Facets 1..4 (O, P, Q, R)
+		// unproject planar X bounds to geographic longitude
+		lonMinRad, _, _ := d.InverseProjectRadians(bounds.MinX(), 0.0)
+		lonMaxRad, _, _ := d.InverseProjectRadians(bounds.MaxX(), 0.0)
+
+		return orb.Bound{
+			Min: orb.Point{lonMinRad * rhealpix.RadToDeg, -capLatDeg},
+			Max: orb.Point{lonMaxRad * rhealpix.RadToDeg, capLatDeg},
+		}
+	}
+}
+
+// CellToBound calculates the orb.Bound envelope for any CellID (CellID64 or CellID128).
+// For Level 0..2, it uses edge-densified polygons to capture global projection edge curvature.
+// For Level 3+, it calculates the envelope directly from the cell's geographic vertices.
+func CellToBound[T rhealpix.CellID](d *rhealpix.RhpDGGS, id T) (orb.Bound, error) {
+	var isZero bool
+	var res uint8
+	var facet uint8
+
+	switch v := any(id).(type) {
+	case rhealpix.CellID64:
+		isZero = v.IsZero()
+		res = v.Resolution()
+		facet = v.Facet()
+	case rhealpix.CellID128:
+		isZero = v.IsZero()
+		res = v.Resolution()
+		facet = v.Facet()
+	}
+
+	if isZero {
+		return orb.Bound{}, fmt.Errorf("zero cell ID")
+	}
+
+	// Level 0 base facets: use exact geodetic cap boundaries
+	if res == 0 {
+		return Level0FacetBound(d, facet), nil
+	}
+
+	// coarse levels (Level 1..2): densify edges to handle non-linear boundary curvature
+	if res <= 2 {
+		poly, err := CellToPolygon(d, id, 8)
+		if err != nil {
+			return orb.Bound{}, err
+		}
+		return poly.Bound(), nil
+	}
+
+	// deep sub-cells (Level 3+)
+	var vertices [][2]float64
+	var err error
+
+	switch v := any(id).(type) {
+	case rhealpix.CellID64:
+		vertices, err = d.GeographicVertices64(v)
+	case rhealpix.CellID128:
+		vertices, err = d.GeographicVertices128(v)
+	}
+	if err != nil {
+		return orb.Bound{}, fmt.Errorf("failed to get geographic vertices for bound: %w", err)
+	}
+
+	minX, maxX := 180.0, -180.0
+	minY, maxY := 90.0, -90.0
+
+	for _, pt := range vertices {
+		lon, lat := pt[0], pt[1]
+
+		if lon < minX {
+			minX = lon
+		}
+		if lon > maxX {
+			maxX = lon
+		}
+		if lat < minY {
+			minY = lat
+		}
+		if lat > maxY {
+			maxY = lat
+		}
+	}
+
+	return orb.Bound{
+		Min: orb.Point{minX, minY},
+		Max: orb.Point{maxX, maxY},
+	}, nil
 }
 
 // Cell64ToBound calculates the orb.Bound envelope for a CellID64 cell.
-// For low resolutions (Level 0..2), it uses densified edges to handle global projection curvature.
-// For deeper resolutions (Level 3+), it directly projects the 4 corner vertices for maximum speed.
-func Cell64ToBound(el *rhealpix.Ellipsoid, id rhealpix.CellID64) (orb.Bound, error) {
-	if id.IsZero() {
-		return orb.Bound{}, fmt.Errorf("zero cell ID")
-	}
-
-	res := id.Resolution()
-
-	// for root/coarse levels, use edge densification to capture curved global boundaries
-	if res <= 2 {
-		poly, err := Cell64ToPolygon(el, id, 8)
-		if err != nil {
-			return orb.Bound{}, err
-		}
-		return poly.Bound(), nil
-	}
-
-	// for deep sub-cells (Level 3+), directly project the 4 planar corners
-	facet := id.Facet()
-	xMin, xMax, yMin, yMax := cellPlanarExtent64(id)
-
-	// local planar corners: UL, UR, LR, LL
-	corners := [4][2]float64{
-		{xMin, yMax},
-		{xMax, yMax},
-		{xMax, yMin},
-		{xMin, yMin},
-	}
-
-	// this might seem counter intuitive, but initialising min to the max value
-	// avoids potential global wrap arounds
-	minX, maxX := 180.0, -180.0
-	minY, maxY := 90.0, -90.0
-
-	for _, pt := range corners {
-		lon, lat := facetLocalToLonLat(el, facet, pt[0], pt[1])
-		if lon < minX {
-			minX = lon
-		}
-		if lon > maxX {
-			maxX = lon
-		}
-		if lat < minY {
-			minY = lat
-		}
-		if lat > maxY {
-			maxY = lat
-		}
-	}
-
-	return orb.Bound{
-		Min: orb.Point{minX, minY},
-		Max: orb.Point{maxX, maxY},
-	}, nil
+func Cell64ToBound(d *rhealpix.RhpDGGS, id rhealpix.CellID64) (orb.Bound, error) {
+	return CellToBound[rhealpix.CellID64](d, id)
 }
 
 // Cell128ToBound calculates the orb.Bound envelope for a CellID128 cell.
-// For low resolutions (Level 0..2), it uses densified edges to handle global projection curvature.
-// For deeper resolutions (Level 3+), it directly projects the 4 corner vertices for maximum speed.
-func Cell128ToBound(el *rhealpix.Ellipsoid, id rhealpix.CellID128) (orb.Bound, error) {
-	if id.IsZero() {
-		return orb.Bound{}, fmt.Errorf("zero cell ID")
-	}
-
-	res := id.Resolution()
-
-	// for root/coarse levels, use edge densification to capture curved global boundaries
-	if res <= 2 {
-		poly, err := Cell128ToPolygon(el, id, 8)
-		if err != nil {
-			return orb.Bound{}, err
-		}
-		return poly.Bound(), nil
-	}
-
-	// for deep sub-cells (Level 3+), directly project the 4 planar corners
-	facet := id.Facet()
-	xMin, xMax, yMin, yMax := cellPlanarExtent128(id)
-
-	// local planar corners: UL, UR, LR, LL
-	corners := [4][2]float64{
-		{xMin, yMax},
-		{xMax, yMax},
-		{xMax, yMin},
-		{xMin, yMin},
-	}
-
-	// this might seem counter intuitive, but initialising min to the max value
-	// avoids potential global wrap arounds
-	minX, maxX := 180.0, -180.0
-	minY, maxY := 90.0, -90.0
-
-	for _, pt := range corners {
-		lon, lat := facetLocalToLonLat(el, facet, pt[0], pt[1])
-		if lon < minX {
-			minX = lon
-		}
-		if lon > maxX {
-			maxX = lon
-		}
-		if lat < minY {
-			minY = lat
-		}
-		if lat > maxY {
-			maxY = lat
-		}
-	}
-
-	return orb.Bound{
-		Min: orb.Point{minX, minY},
-		Max: orb.Point{maxX, maxY},
-	}, nil
+func Cell128ToBound(d *rhealpix.RhpDGGS, id rhealpix.CellID128) (orb.Bound, error) {
+	return CellToBound[rhealpix.CellID128](d, id)
 }
 
 // DeriveRegionCode64FromGeometry calculates the canonical region_code string for any orb.Geometry footprint.
-func DeriveRegionCode64FromGeometry(el *rhealpix.Ellipsoid, geom orb.Geometry, targetRes uint8) (string, []string, error) {
+func DeriveRegionCode64FromGeometry(d *rhealpix.RhpDGGS, geom orb.Geometry, targetRes uint8) (string, []string, error) {
 	vertices, err := extractGeometryVertices(geom)
 	if err != nil {
 		return "", nil, err
@@ -230,7 +211,7 @@ func DeriveRegionCode64FromGeometry(el *rhealpix.Ellipsoid, geom orb.Geometry, t
 
 	facetGroups := make(map[uint8][]rhealpix.CellID64)
 	for _, pt := range vertices {
-		cell, err := rhealpix.ForwardTransform64(el, pt.X(), pt.Y(), targetRes)
+		cell, err := d.ForwardTransform64(pt.X(), pt.Y(), targetRes)
 		if err != nil {
 			return "", nil, err
 		}
@@ -239,8 +220,7 @@ func DeriveRegionCode64FromGeometry(el *rhealpix.Ellipsoid, geom orb.Geometry, t
 
 	var suids []string
 	for _, groupCells := range facetGroups {
-		var lcaCell rhealpix.CellID64
-		lcaCell = groupCells[0]
+		lcaCell := groupCells[0]
 		for _, cell := range groupCells[1:] {
 			var lcaErr error
 			lcaCell, lcaErr = rhealpix.CommonAncestor64(lcaCell, cell)
@@ -256,7 +236,7 @@ func DeriveRegionCode64FromGeometry(el *rhealpix.Ellipsoid, geom orb.Geometry, t
 }
 
 // DeriveRegionCode128FromGeometry calculates the canonical region_code string using 128-bit precision.
-func DeriveRegionCode128FromGeometry(el *rhealpix.Ellipsoid, geom orb.Geometry, targetRes uint8) (string, []string, error) {
+func DeriveRegionCode128FromGeometry(d *rhealpix.RhpDGGS, geom orb.Geometry, targetRes uint8) (string, []string, error) {
 	vertices, err := extractGeometryVertices(geom)
 	if err != nil {
 		return "", nil, err
@@ -264,7 +244,7 @@ func DeriveRegionCode128FromGeometry(el *rhealpix.Ellipsoid, geom orb.Geometry, 
 
 	facetGroups := make(map[uint8][]rhealpix.CellID128)
 	for _, pt := range vertices {
-		cell, err := rhealpix.ForwardTransform128(el, pt.X(), pt.Y(), targetRes)
+		cell, err := d.ForwardTransform128(pt.X(), pt.Y(), targetRes)
 		if err != nil {
 			return "", nil, err
 		}
@@ -273,8 +253,7 @@ func DeriveRegionCode128FromGeometry(el *rhealpix.Ellipsoid, geom orb.Geometry, 
 
 	var suids []string
 	for _, groupCells := range facetGroups {
-		var lcaCell rhealpix.CellID128
-		lcaCell = groupCells[0]
+		lcaCell := groupCells[0]
 		for _, cell := range groupCells[1:] {
 			var lcaErr error
 			lcaCell, lcaErr = rhealpix.CommonAncestor128(lcaCell, cell)
@@ -290,11 +269,11 @@ func DeriveRegionCode128FromGeometry(el *rhealpix.Ellipsoid, geom orb.Geometry, 
 }
 
 // DeriveRegionCode automatically selects 64-bit or 128-bit derivation based on resolution depth.
-func DeriveRegionCode(el *rhealpix.Ellipsoid, geom orb.Geometry, targetRes uint8) (string, []string, error) {
+func DeriveRegionCode(d *rhealpix.RhpDGGS, geom orb.Geometry, targetRes uint8) (string, []string, error) {
 	if targetRes <= rhealpix.MaxResolution64 {
-		return DeriveRegionCode64FromGeometry(el, geom, targetRes)
+		return DeriveRegionCode64FromGeometry(d, geom, targetRes)
 	}
-	return DeriveRegionCode128FromGeometry(el, geom, targetRes)
+	return DeriveRegionCode128FromGeometry(d, geom, targetRes)
 }
 
 // DeriveRegionCodeAtRes calculates a fixed-resolution spatial cover string for any orb.Geometry footprint.
@@ -309,12 +288,12 @@ func DeriveRegionCode(el *rhealpix.Ellipsoid, geom orb.Geometry, targetRes uint8
 // O07
 // S03-S04-S06-S07
 func DeriveRegionCodeAtRes(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	geom orb.Geometry,
 	targetRes uint8, // e.g. 3 or 4 for Landsat
 ) (string, []string, error) {
 	// walk/decompose geometry up to targetRes
-	cells, err := STACGeometryToTileDBRangesTopDown128(el, geom, targetRes)
+	cells, err := STACGeometryToTileDBRangesTopDown128(d, geom, targetRes)
 	// cells, err := STACGeometryToTileDBRangesTopDown(el, geom, targetRes)  // testing equivalencce
 	if err != nil {
 		return "", nil, err
@@ -333,134 +312,6 @@ func DeriveRegionCodeAtRes(
 
 	sort.Strings(suids)
 	return strings.Join(suids, "-"), suids, nil
-}
-
-// --- wrapers used for testing code external to this repo ---
-// keep as Public funcs for the time being; could change in future
-
-// CellPlanarExtent64 public wrapper for private cellPlanarExtent64.
-// Subject to change, posibly remove in future.
-func CellPlanarExtent64(id rhealpix.CellID64) (xMin, xMax, yMin, yMax float64) {
-	xMin, xMax, yMin, yMax = cellPlanarExtent64(id)
-	return
-}
-
-// AlignVertices public wrapper for private alignVertices.
-// Subject to change, posibly remove in future.
-func AlignVertices(corners [4][2]float64, shape rhealpix.CellShape, facet uint8) (data [4][2]float64) {
-	data = alignVertices(corners, shape, facet)
-	return
-}
-
-// --- Internal Helpers ---
-
-func cellPlanarExtent64(id rhealpix.CellID64) (xMin, xMax, yMin, yMax float64) {
-	xMin, xMax = 0.0, 1.0
-	yMin, yMax = 0.0, 1.0
-	res := id.Resolution()
-	rawID := uint64(id)
-
-	for i := uint8(0); i < res; i++ {
-		shift := 52 - (i * 4)
-		subCell := uint8((rawID >> shift) & rhealpix.SubCellMask)
-
-		xIdx := float64(subCell % 3)
-		yIdx := float64(subCell / 3)
-
-		spanX := (xMax - xMin) / 3.0
-		spanY := (yMax - yMin) / 3.0
-
-		xMin = xMin + (xIdx * spanX)
-		xMax = xMin + spanX
-		yMin = yMin + (yIdx * spanY)
-		yMax = yMin + spanY
-	}
-	return
-}
-
-func cellPlanarExtent128(id rhealpix.CellID128) (xMin, xMax, yMin, yMax float64) {
-	xMin, xMax = 0.0, 1.0
-	yMin, yMax = 0.0, 1.0
-	res := id.Resolution()
-
-	for i := uint8(0); i < res; i++ {
-		var subCell uint8
-		if i < 14 {
-			shift := 52 - (i * 4)
-			subCell = uint8((id.High >> shift) & rhealpix.SubCellMask)
-		} else {
-			shift := 60 - ((i - 14) * 4)
-			subCell = uint8((id.Low >> shift) & rhealpix.SubCellMask)
-		}
-
-		xIdx := float64(subCell % 3)
-		yIdx := float64(subCell / 3)
-
-		spanX := (xMax - xMin) / 3.0
-		spanY := (yMax - yMin) / 3.0
-
-		xMin = xMin + (xIdx * spanX)
-		xMax = xMin + spanX
-		yMin = yMin + (yIdx * spanY)
-		yMax = yMin + spanY
-	}
-
-	// now we may get data/floating point drift, maybe noticeable at >= level 25 ...
-	// TODO: need to investigate a potential alternate approach
-	return
-}
-
-// alignVertices re-orders vertices for Skew Quads and Darts so that geographic NW is preserved.
-// Essentially, it cyclically rotates planar corners so index 0 corresponds to geographic NW.
-func alignVertices(
-	corners [4][2]float64,
-	shape rhealpix.CellShape,
-	facet uint8,
-) [4][2]float64 {
-	// standard Quadrilaterals and Cap cells require no rotation
-	if shape == rhealpix.ShapeQuad || shape == rhealpix.ShapeCap {
-		return corners
-	}
-
-	idx := 0
-
-	if shape == rhealpix.ShapeDart {
-		if facet == 0 { // North Pole Cap ('N')
-			// geographic NW is the poleward vertex (max Y in planar space)
-			maxY := -1.0
-			for i, pt := range corners {
-				if pt[1] > maxY {
-					maxY = pt[1]
-					idx = i
-				}
-			}
-		} else if facet == 5 { // South Pole Cap ('S')
-			// rotate so the collapsed seam vertex lands at index 1.
-			// starting index at (poleIdx + 3) % 4 aligns index 0 to NW
-			// and puts the seam point at index 1 for pop(1).
-			minY := math.MaxFloat64
-			poleIdx := 0
-			for i, pt := range corners {
-				if pt[1] < minY {
-					minY = pt[1]
-					poleIdx = i
-				}
-			}
-			idx = (poleIdx + 3) % 4
-		}
-	} else if shape == rhealpix.ShapeSkewQuad {
-		// Skew Quads keep all 4 vertices; align to NW start corner
-		if facet == 0 || facet == 5 {
-			idx = 0
-		}
-	}
-
-	// cyclic rotation starting at geographic NW (index 0)
-	var rotated [4][2]float64
-	for i := 0; i < 4; i++ {
-		rotated[i] = corners[(idx+i)%4]
-	}
-	return rotated
 }
 
 // extractGeometryVerticesDensify adds a little more robustness for geometries
@@ -567,21 +418,25 @@ func extractGeometryVertices(geom orb.Geometry) ([]orb.Point, error) {
 	return vertices, nil
 }
 
-func facetLocalToLonLat(el *rhealpix.Ellipsoid, facet uint8, xLocal, yLocal float64) (float64, float64) {
+func facetLocalToLonLat(d *rhealpix.RhpDGGS, facet uint8, xLocal, yLocal float64) (float64, float64) {
 	// convert local facet coordinates [0, 1] x [0, 1] to global planar radians
-	xRhp, yRhp := rhealpix.FacetLocalToRadians(facet, xLocal, yLocal)
+	xRhp, yRhp := d.FacetLocalToRadians(facet, xLocal, yLocal)
 
-	// scale planar radians to projected meters on WGS84
-	xMeters := xRhp * el.RA
-	yMeters := yRhp * el.RA
+	// scale planar radians to projected metres on WGS84
+	// inverse project planar radians to relative lonRad and authalic latitude (beta)
+	// (InverseProjectRadians automatically applies northSquare, southSquare, and Lon0)
+	lonRad, beta, _ := d.InverseProjectRadians(xRhp, yRhp)
 
-	// inverse project meters to true geodetic Lon/Lat (degrees)
-	return el.InverseProject(xMeters, yMeters)
+	// convert authalic latitude back to geodetic latitude & convert to degrees
+	latRad := d.GetEllipsoid().AuthLatInverse(beta)
+
+	// inverse project metres to true geodetic Lon/Lat (degrees)
+	return lonRad * rhealpix.RadToDeg, latRad * rhealpix.RadToDeg
 }
 
 // DeriveCentroidRegionCode returns the single rHEALPix cell SUID for the geometry's centroid at targetRes.
 func DeriveCentroidRegionCode(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	geom orb.Geometry,
 	targetRes uint8,
 ) (string, error) {
@@ -593,7 +448,7 @@ func DeriveCentroidRegionCode(
 	center := geom.Bound().Center()
 
 	// projection from (Lon, Lat) to CellID128 (rhealpix space)
-	cellID, err := rhealpix.ForwardTransform128(el, center.X(), center.Y(), targetRes)
+	cellID, err := d.ForwardTransform128(center.X(), center.Y(), targetRes)
 	if err != nil {
 		return "", fmt.Errorf("failed projecting centroid to cell: %w", err)
 	}
@@ -605,7 +460,7 @@ func DeriveCentroidRegionCode(
 // containing the corners of the geometry's WGS84 bounding box at targetRes.
 // Each decomposed cell in the string is joined by a hyphen (-).
 func DeriveBoundingCornerCodes(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	geom orb.Geometry,
 	targetRes uint8,
 ) (string, []string, error) {
@@ -640,7 +495,7 @@ func DeriveBoundingCornerCodes(
 	cellSet := make(map[string]struct{}, len(corners))
 
 	for _, pt := range corners {
-		cellID, err := rhealpix.ForwardTransform128(el, pt.X(), pt.Y(), targetRes)
+		cellID, err := d.ForwardTransform128(pt.X(), pt.Y(), targetRes)
 		if err != nil {
 			return "", nil, fmt.Errorf("failed projecting corner point %v: %w", pt, err)
 		}

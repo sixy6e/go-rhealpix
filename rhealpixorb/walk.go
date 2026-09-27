@@ -36,6 +36,32 @@ func (pb PlanarBox) Subdivide3x3() [9]PlanarBox {
 	return children
 }
 
+// Subdivide splits a PlanarBox into an N x N grid of child boxes matching
+// the rHEALPix child ordering (0 .. N^2-1) in Top-Left (UL) space.
+func (pb PlanarBox) Subdivide(nSide uint8) []PlanarBox {
+	n := int(nSide)
+	totalChildren := n * n
+	children := make([]PlanarBox, totalChildren)
+
+	stepX := (pb.MaxX - pb.MinX) / float64(n)
+	stepY := (pb.MaxY - pb.MinY) / float64(n)
+
+	idx := 0
+	for row := 0; row < n; row++ { // Top-to-Bottom (Row ordering)
+		y0 := pb.MinY + float64(row)*stepY
+		y1 := pb.MinY + float64(row+1)*stepY
+
+		for col := 0; col < n; col++ { // Left-to-Right (Column ordering)
+			x0 := pb.MinX + float64(col)*stepX
+			x1 := pb.MinX + float64(col+1)*stepX
+
+			children[idx] = PlanarBox{MinX: x0, MaxX: x1, MinY: y0, MaxY: y1}
+			idx++
+		}
+	}
+	return children
+}
+
 // ToBound converts a PlanarBox to an orb.Bound.
 func (pb PlanarBox) ToBound() orb.Bound {
 	return orb.Bound{
@@ -88,8 +114,20 @@ func NewPreparedGeometry(geom orb.Geometry) PreparedGeometry {
 
 	for _, poly := range polys {
 		for _, ring := range poly {
-			for i := 0; i < len(ring)-1; i++ {
-				p1, p2 := ring[i], ring[i+1]
+			if len(ring) < 3 {
+				continue
+			}
+
+			// ensure ring is closed for segment generation
+			closedRing := ring
+			if ring[0] != ring[len(ring)-1] {
+				closedRing = make(orb.Ring, len(ring)+1)
+				copy(closedRing, ring)
+				closedRing[len(ring)] = ring[0]
+			}
+
+			for i := 0; i < len(closedRing)-1; i++ {
+				p1, p2 := closedRing[i], closedRing[i+1]
 
 				minX, maxX := p1[0], p2[0]
 				if minX > maxX {
@@ -282,19 +320,19 @@ func intersectsAnySegment(segments []PlanarSegment, box PlanarBox) bool {
 }
 
 // projectGeometryToPlanar maps a WGS84 geometry to normalised [0, 1] x [0, 1] facet local planar space.
-func projectGeometryToPlanar(el *rhealpix.Ellipsoid, facetID uint8, geom orb.Geometry) orb.Geometry {
+func projectGeometryToPlanar(d *rhealpix.RhpDGGS, facetID uint8, geom orb.Geometry) orb.Geometry {
 	if geom == nil {
 		return nil
 	}
 
 	switch g := geom.(type) {
 	case orb.Polygon:
-		proj := projectPolygonToPlanar(el, facetID, g)
+		proj := projectPolygonToPlanar(d, facetID, g)
 		return ensurePolygonCCW(proj)
 	case orb.MultiPolygon:
 		var mp orb.MultiPolygon
 		for _, poly := range g {
-			proj := projectPolygonToPlanar(el, facetID, poly)
+			proj := projectPolygonToPlanar(d, facetID, poly)
 			ccw := ensurePolygonCCW(proj)
 			if len(ccw) > 0 {
 				mp = append(mp, ccw)
@@ -309,8 +347,42 @@ func projectGeometryToPlanar(el *rhealpix.Ellipsoid, facetID uint8, geom orb.Geo
 	}
 }
 
+// DensifyWGS84Ring inserts intermediate sample points along WGS84 ring edges
+// so non-linear polar cap projections preserve curved boundary shapes and quadrant seams.
+func DensifyWGS84Ring(ring orb.Ring, pointsPerSegment int) orb.Ring {
+	if len(ring) < 2 || pointsPerSegment <= 1 {
+		return ring
+	}
+
+	densified := make(orb.Ring, 0, (len(ring)-1)*pointsPerSegment+1)
+
+	for i := 0; i < len(ring)-1; i++ {
+		p1 := ring[i]
+		p2 := ring[i+1]
+
+		for s := 0; s < pointsPerSegment; s++ {
+			t := float64(s) / float64(pointsPerSegment)
+			x := p1[0] + t*(p2[0]-p1[0])
+			y := p1[1] + t*(p2[1]-p1[1])
+			densified = append(densified, orb.Point{x, y})
+		}
+	}
+
+	densified = append(densified, ring[len(ring)-1])
+	return densified
+}
+
 // projectPolygonToPlanar maps a WGS84 polygon to normalised [0, 1] x [0, 1] facet local planar space.
-func projectPolygonToPlanar(el *rhealpix.Ellipsoid, facetID uint8, poly orb.Polygon) orb.Polygon {
+func projectPolygonToPlanar(d *rhealpix.RhpDGGS, facetID uint8, poly orb.Polygon) orb.Polygon {
+	// densify polar cap facets (0=N, 5=S) to capture non-linear parallel curvature and 0° seam apexes
+	if facetID == 0 || facetID == 5 {
+		densifiedPoly := make(orb.Polygon, len(poly))
+		for i, ring := range poly {
+			densifiedPoly[i] = DensifyWGS84Ring(ring, 16)
+		}
+		poly = densifiedPoly
+	}
+
 	projected := make(orb.Polygon, len(poly))
 
 	for i, ring := range poly {
@@ -318,7 +390,7 @@ func projectPolygonToPlanar(el *rhealpix.Ellipsoid, facetID uint8, poly orb.Poly
 		for j, pt := range ring {
 			lon, lat := pt[0], pt[1]
 
-			xLoc, yLoc, err := rhealpix.LonLatToPlanar(el, facetID, lon, lat)
+			xLoc, yLoc, err := d.LonLatToPlanar(facetID, lon, lat)
 			if err != nil {
 				projectedRing[j] = orb.Point{lon, lat}
 				continue
@@ -330,6 +402,134 @@ func projectPolygonToPlanar(el *rhealpix.Ellipsoid, facetID uint8, poly orb.Poly
 	}
 
 	return projected
+}
+
+// ForwardProjectPolygon densifies long edges and projects geographic points directly through RhpDGGS.
+func ForwardProjectPolygon(d *rhealpix.RhpDGGS, poly orb.Polygon) orb.Polygon {
+	if len(poly) == 0 {
+		return nil
+	}
+
+	projected := make(orb.Polygon, len(poly))
+
+	for i, ring := range poly {
+		// densify segment edges to prevent planar curvature bowing
+		// denseRing := densifyRing(ring, 0.05) // ~5km step size
+		denseRing := densifyRing(ring, 0.02) // ~2km step size
+
+		// project directly via standard 3-stage ForwardProjectRadians
+		projectedRing := make(orb.Ring, 0, len(denseRing))
+		for _, pt := range denseRing {
+			lonRad := pt.X() * rhealpix.DegToRad
+			latRad := pt.Y() * rhealpix.DegToRad
+
+			// pure projection call: HealpixSphere -> Seam Lock -> combineTriangles
+			xRhp, yRhp, _ := d.ForwardProjectRadians(lonRad, latRad)
+			projectedRing = append(projectedRing, orb.Point{xRhp, yRhp})
+		}
+
+		projected[i] = projectedRing
+	}
+
+	return projected
+}
+
+// ForwardProjectPolygon densifies long edges and projects geographic points directly through RhpDGGS.
+func ForwardProjectPolygonForcedRegion(d *rhealpix.RhpDGGS, poly orb.Polygon, region rhealpix.CellRegion) orb.Polygon {
+	if len(poly) == 0 {
+		return nil
+	}
+
+	projected := make(orb.Polygon, len(poly))
+
+	for i, ring := range poly {
+		// densify segment edges to prevent planar curvature bowing
+		// denseRing := densifyRing(ring, 0.05) // ~5km step size
+		denseRing := densifyRing(ring, 0.02) // ~2km step size
+		fmt.Println("Geo Ring Point Count:", len(denseRing))
+
+		// project directly via standard 3-stage ForwardProjectRadians
+		projectedRing := make(orb.Ring, 0, len(denseRing))
+		for _, pt := range denseRing {
+			lonRad := pt.X() * rhealpix.DegToRad
+			latRad := pt.Y() * rhealpix.DegToRad
+
+			// pure projection call: HealpixSphere -> Seam Lock -> combineTriangles
+			xRhp, yRhp, _ := d.ForwardProjectForcedRegion(lonRad, latRad, region)
+			projectedRing = append(projectedRing, orb.Point{xRhp, yRhp})
+		}
+
+		projected[i] = projectedRing
+	}
+
+	return projected
+}
+
+func PartitionPolygonToCells(d *rhealpix.RhpDGGS, inputGeom orb.Geometry, targetRes uint8) ([]rhealpix.CellID64, error) {
+	facetSubGeoms, err := ClipGeometryToFacets(d, inputGeom)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println("len(facetSubGeoms):", len(facetSubGeoms))
+
+	rawCells := make([]rhealpix.CellID64, 0, 128)
+	rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
+
+	for _, sub := range facetSubGeoms {
+		fmt.Println("sub.FacetID:", sub.FacetID)
+
+		rootCell, err := rhealpix.PackCellID64(sub.FacetID, 0, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		// transform global planar radians -> Local [0, 1] Facet UV
+		localGeom := PlanarToLocalUVGeometry(d, sub.FacetID, sub.Geometry)
+
+		// prepare local geometry & perform quadtree walk inside [0, 1] x [0, 1]
+		// rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
+		prep := NewPreparedGeometry(localGeom)
+		rawCells = WalkPlanarCellGeneric(d, rootCell, rootBox, prep, targetRes, rawCells)
+	}
+
+	return rawCells, nil
+}
+
+// PlanarToLocalUVGeometry transforms an orb.Geometry from global planar radians [x, y]
+// into local unit square coordinates [0, 1] x [0, 1] for a given base facet.
+func PlanarToLocalUVGeometry(d *rhealpix.RhpDGGS, facetID uint8, geom orb.Geometry) orb.Geometry {
+	if geom == nil {
+		return nil
+	}
+
+	switch g := geom.(type) {
+	case orb.Polygon:
+		return transformPolygonUV(d, facetID, g)
+
+	case orb.MultiPolygon:
+		mp := make(orb.MultiPolygon, len(g))
+		for i, poly := range g {
+			mp[i] = transformPolygonUV(d, facetID, poly)
+		}
+		return mp
+
+	default:
+		return nil
+	}
+}
+
+func transformPolygonUV(d *rhealpix.RhpDGGS, facetID uint8, poly orb.Polygon) orb.Polygon {
+	out := make(orb.Polygon, len(poly))
+	for r, ring := range poly {
+		localRing := make(orb.Ring, len(ring))
+		for i, pt := range ring {
+			// pt[0] = xRhp, pt[1] = yRhp in authalic planar radians
+			u, v := d.RadiansToFacetLocal(facetID, pt[0], pt[1])
+			localRing[i] = orb.Point{u, v}
+		}
+		out[r] = localRing
+	}
+	return out
 }
 
 // WalkPlanarCell recursively walks the rHEALPix nonary tree in local planar space.
@@ -372,6 +572,45 @@ func WalkPlanarCell(
 	return results
 }
 
+func WalkPlanarCellGeneric(
+	d *rhealpix.RhpDGGS,
+	cell rhealpix.CellID64,
+	box PlanarBox,
+	prep PreparedGeometry,
+	targetRes uint8,
+	results []rhealpix.CellID64,
+) []rhealpix.CellID64 {
+	relation := EvaluateBoxRelation(box, prep)
+
+	switch relation {
+	case BoxOutside:
+		return results
+
+	case BoxInside:
+		return append(results, cell)
+
+	case BoxStraddles:
+		if cell.Resolution() >= targetRes {
+			return append(results, cell)
+		}
+
+		// Dynamically subdivide into N x N children
+		childBoxes := box.Subdivide(d.Nside())
+		numChildren := uint8(len(childBoxes))
+
+		for i := uint8(0); i < numChildren; i++ {
+			childCell, err := cell.Child(i)
+			if err != nil {
+				continue
+			}
+
+			results = WalkPlanarCellGeneric(d, childCell, childBoxes[i], prep, targetRes, results)
+		}
+	}
+
+	return results
+}
+
 // STACGeometryToTileDBRangesTopDown performs top-down nonary tree spatial decomposition
 // of a WGS84 geometry into a compacted set of rHEALPix cell IDs up to targetRes.
 //
@@ -386,11 +625,11 @@ func WalkPlanarCell(
 // indexing in TileDB.
 // The approach of top down planar decomposition and compaction, is similar to Uber's H3 PolyFill.
 func STACGeometryToTileDBRangesTopDown(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	geom orb.Geometry,
 	targetRes uint8,
 ) ([]rhealpix.CellID64, error) {
-	facetSubGeoms, err := ClipGeometryToFacets(el, geom)
+	facetSubGeoms, err := ClipGeometryToFacets(d, geom)
 	if err != nil {
 		return nil, fmt.Errorf("failed clipping geometry to facets: %w", err)
 	}
@@ -405,7 +644,7 @@ func STACGeometryToTileDBRangesTopDown(
 			return nil, err
 		}
 
-		planarGeom := projectGeometryToPlanar(el, sub.FacetID, sub.Geometry)
+		planarGeom := projectGeometryToPlanar(d, sub.FacetID, sub.Geometry)
 		if planarGeom == nil {
 			continue
 		}
@@ -419,6 +658,24 @@ func STACGeometryToTileDBRangesTopDown(
 		return nil, fmt.Errorf("failed compacting decomposed cells: %w", err)
 	}
 
+	return compacted, nil
+}
+
+// STACGeometryToTileDBRangesTopDown2 just a temporary func, whilst bugs are worked through
+func STACGeometryToTileDBRangesTopDown2(
+	d *rhealpix.RhpDGGS,
+	geom orb.Geometry,
+	targetRes uint8,
+) ([]rhealpix.CellID64, error) {
+	rawCells, err := PartitionPolygonToCells(d, geom, targetRes)
+	if err != nil {
+		return nil, fmt.Errorf("failed PartitionPolygonToCells: %w", err)
+	}
+	fmt.Println("len(rawCells): ", len(rawCells))
+	compacted, err := rhealpix.Compact(rawCells)
+	if err != nil {
+		return nil, fmt.Errorf("failed compacting decomposed cells: %w", err)
+	}
 	return compacted, nil
 }
 
@@ -476,11 +733,11 @@ func WalkPlanarCell128(
 // indexing in TileDB.
 // The approach of top down planar decomposition and compaction, is similar to Uber's H3 PolyFill.
 func STACGeometryToTileDBRangesTopDown128(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	geom orb.Geometry,
 	targetRes uint8,
 ) ([]rhealpix.CellID128, error) {
-	facetSubGeoms, err := ClipGeometryToFacets(el, geom)
+	facetSubGeoms, err := ClipGeometryToFacets(d, geom)
 	if err != nil {
 		return nil, fmt.Errorf("failed clipping geometry to facets: %w", err)
 	}
@@ -495,7 +752,7 @@ func STACGeometryToTileDBRangesTopDown128(
 			return nil, err
 		}
 
-		planarGeom := projectGeometryToPlanar(el, sub.FacetID, sub.Geometry)
+		planarGeom := projectGeometryToPlanar(d, sub.FacetID, sub.Geometry)
 		if planarGeom == nil {
 			continue
 		}

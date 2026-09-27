@@ -13,14 +13,14 @@ import (
 
 // ExportRangesToGeoJSON exports the Min and Max endpoint cells of each Uint64Range
 // to a GeoJSON FeatureCollection file for QGIS / GeoJSON.io inspection.
-func ExportRangesToGeoJSON(el *rhealpix.Ellipsoid, ranges []Uint64Range, outputPath string) error {
+func ExportRangesToGeoJSON(d *rhealpix.RhpDGGS, ranges []Uint64Range, outputPath string) error {
 	fc := geojson.NewFeatureCollection()
 
 	for i, r := range ranges {
 		// min boundary cell
 		minID := rhealpix.CellID64(r.Min)
 		if !minID.IsZero() {
-			minPoly, err := Cell64ToPolygon(el, minID, 1)
+			minPoly, err := Cell64ToPolygon(d, minID, 1)
 			if err == nil {
 				feat := geojson.NewFeature(minPoly)
 				feat.Properties["range_index"] = i
@@ -35,7 +35,7 @@ func ExportRangesToGeoJSON(el *rhealpix.Ellipsoid, ranges []Uint64Range, outputP
 		// max boundary cell
 		maxID := rhealpix.CellID64(r.Max)
 		if !maxID.IsZero() {
-			maxPoly, err := Cell64ToPolygon(el, maxID, 1)
+			maxPoly, err := Cell64ToPolygon(d, maxID, 1)
 			if err == nil {
 				feat := geojson.NewFeature(maxPoly)
 				feat.Properties["range_index"] = i
@@ -58,13 +58,13 @@ func ExportRangesToGeoJSON(el *rhealpix.Ellipsoid, ranges []Uint64Range, outputP
 
 // ExportRangesToGeoJSON128 exports the Min and Max endpoint cells of each Uint128Range
 // to a GeoJSON FeatureCollection file for QGIS / GeoJSON.io inspection.
-func ExportRangesToGeoJSON128(el *rhealpix.Ellipsoid, ranges []Uint128Range, outputPath string) error {
+func ExportRangesToGeoJSON128(d *rhealpix.RhpDGGS, ranges []Uint128Range, outputPath string) error {
 	fc := geojson.NewFeatureCollection()
 
 	for i, r := range ranges {
 		minID := r.MinCell()
 		if !minID.IsZero() {
-			minPoly, err := Cell128ToPolygon(el, minID, 1)
+			minPoly, err := Cell128ToPolygon(d, minID, 1)
 			if err == nil {
 				feat := geojson.NewFeature(minPoly)
 				feat.Properties["range_index"] = i
@@ -77,7 +77,7 @@ func ExportRangesToGeoJSON128(el *rhealpix.Ellipsoid, ranges []Uint128Range, out
 
 		maxID := r.MaxCell()
 		if !maxID.IsZero() {
-			maxPoly, err := Cell128ToPolygon(el, maxID, 1)
+			maxPoly, err := Cell128ToPolygon(d, maxID, 1)
 			if err == nil {
 				feat := geojson.NewFeature(maxPoly)
 				feat.Properties["range_index"] = i
@@ -99,11 +99,11 @@ func ExportRangesToGeoJSON128(el *rhealpix.Ellipsoid, ranges []Uint128Range, out
 
 // ExportCellsToGeoJSON converts a slice of CellID64 into a GeoJSON FeatureCollection file
 // with cell metadata properties for inspection in QGIS / ogrinfo.
-func ExportCellsToGeoJSON(el *rhealpix.Ellipsoid, cells []rhealpix.CellID64, outputPath string) error {
+func ExportCellsToGeoJSON(d *rhealpix.RhpDGGS, cells []rhealpix.CellID64, outputPath string) error {
 	fc := geojson.NewFeatureCollection()
 
 	for _, cell := range cells {
-		poly, err := Cell64ToPolygon(el, cell, 2)
+		poly, err := Cell64ToPolygon(d, cell, 2)
 		if err != nil {
 			return fmt.Errorf("failed converting cell %d to polygon: %w", cell, err)
 		}
@@ -144,11 +144,11 @@ func ExportCellsToGeoJSON(el *rhealpix.Ellipsoid, cells []rhealpix.CellID64, out
 
 // ExportCellsToGeoJSON128 converts a slice of CellID128 into a GeoJSON FeatureCollection file
 // with cell metadata properties for inspection in QGIS / ogrinfo.
-func ExportCellsToGeoJSON128(el *rhealpix.Ellipsoid, cells []rhealpix.CellID128, outputPath string) error {
+func ExportCellsToGeoJSON128(d *rhealpix.RhpDGGS, cells []rhealpix.CellID128, outputPath string) error {
 	fc := geojson.NewFeatureCollection()
 
 	for _, cell := range cells {
-		poly, err := Cell128ToPolygon(el, cell, 2)
+		poly, err := Cell128ToPolygon(d, cell, 2)
 		if err != nil {
 			return fmt.Errorf("failed converting cell %s to polygon: %w", cell.String(), err)
 		}
@@ -184,5 +184,39 @@ func ExportCellsToGeoJSON128(el *rhealpix.Ellipsoid, cells []rhealpix.CellID128,
 	}
 
 	// fmt.Printf("Exported %d compacted 128-bit cells to %s\n", len(cells), outputPath)
+	return nil
+}
+
+// FacetName returns the canonical character identifier for a facet ID [0..5].
+func FacetName(facetID uint8) string {
+	names := [6]string{"N", "O", "P", "Q", "R", "S"}
+	if facetID > 5 {
+		return "Unknown"
+	}
+	return names[facetID]
+}
+
+// ExportFacetSubGeometriesToGeoJSON writes a []FacetSubGeometry slice to a GeoJSON file.
+func ExportFacetSubGeometriesToGeoJSON(subGeoms []FacetSubGeometry, filePath string) error {
+	fc := geojson.NewFeatureCollection()
+
+	for i, sg := range subGeoms {
+		feat := geojson.NewFeature(sg.Geometry)
+		feat.Properties["facet_id"] = sg.FacetID
+		feat.Properties["facet_name"] = FacetName(sg.FacetID)
+		feat.Properties["piece_index"] = i
+
+		fc.Append(feat)
+	}
+
+	data, err := json.MarshalIndent(fc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal geojson: %w", err)
+	}
+
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write file %s: %w", filePath, err)
+	}
+
 	return nil
 }

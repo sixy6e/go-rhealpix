@@ -9,7 +9,7 @@ var _ Cell[CellID128] = CellID128{}
 var _ fmt.Stringer = CellID128{}
 
 // CellID128 represents a 128-bit bit-packed rHEALPix cell identifier.
-// Supports resolution levels 0 through 30 (~sub-millimeter global accuracy).
+// Supports resolution levels 0 through 30 (~sub-millimetre global accuracy).
 //
 // ============================================================================
 // GLOBAL 128-BIT LAYOUT (MSB to LSB across 128 bits):

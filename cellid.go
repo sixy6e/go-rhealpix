@@ -26,13 +26,14 @@ var (
 )
 
 // CellShape represents the topological geometry type of an rHEALPix cell in geographic space.
+// ShapeQuad, ShapeCap, ShapeDart, ShapeSkewQuad
 type CellShape uint8
 
 const (
 	// Standard equatorial or planar interior quad
 	ShapeQuad CellShape = 0
 
-	// Polar cap center cell (nested under sub-cell 4)
+	// Polar cap centre cell (nested under sub-cell 4)
 	ShapeCap CellShape = 1
 
 	// Triangular seam cell along polar cardinal axes
@@ -40,6 +41,17 @@ const (
 
 	// Polar cell straddling a triangle boundary requiring vertex rotation
 	ShapeSkewQuad CellShape = 3
+)
+
+// CellRegion represents the reion of the cell:
+// RegionAuto, RegionEquatorial, RegionNorthPolar, RegionSouthPolar
+type CellRegion uint8
+
+const (
+	RegionAuto       CellRegion = iota // 0: Default zero-value (triggers auto-detection)
+	RegionEquatorial                   // 1
+	RegionNorthPolar                   // 2
+	RegionSouthPolar                   // 3
 )
 
 // String returns the human-readable name of the cell shape.
@@ -81,40 +93,56 @@ type SubtreeRanger[T CellID] interface {
 
 // --- Topology Classification Functions ---
 
-// CellShape64 determines the geographic shape classification of a CellID64.
-func CellShape64(id CellID64) CellShape {
-	facet := id.Facet()
-	// equatorial facets (O, P, Q, R -> Facets 1..4) are always standard quads
+// EllipsoidalCellShape determines the ellipsoidal shape classification ('quad', 'cap', 'dart', or 'skew_quad')
+// of any CellID (CellID64 or CellID128) using the configured nSide subdivision factor.
+func EllipsoidalCellShape[T CellID](d *RhpDGGS, id T) CellShape {
+	var anyID any = id
+	var facet uint8
+	var res uint8
+
+	switch v := anyID.(type) {
+	case CellID64:
+		facet = v.Facet()
+		res = v.Resolution()
+	case CellID128:
+		facet = v.Facet()
+		res = v.Resolution()
+	}
+
+	// Equatorial facets (1..4) are always standard quads
 	if facet >= 1 && facet <= 4 {
 		return ShapeQuad
 	}
 
-	res := id.Resolution()
+	// Root polar cap facets (Level 0 N/S) are cap cells
 	if res == 0 {
-		return ShapeQuad
+		return ShapeCap
 	}
 
-	rawID := uint64(id)
+	nside := uint16(d.nSide)
+	n2 := uint16(nside * nside)
 
-	// Cap check: all digits must be 4
-	isCap := true
-	for i := uint8(0); i < res; i++ {
-		shift := 52 - (i * 4)
-		if uint8((rawID>>shift)&SubCellMask) != 4 {
-			isCap = false
-			break
+	// Cap Check
+	// Cap cells only exist for odd nSide layouts where a central child cell exists: (N^2 - 1) / 2
+	isCap := (nside%2 == 1)
+	if isCap {
+		centreDigit := uint8((n2 - 1) / 2)
+		for i := uint8(0); i < res; i++ {
+			if extractSubCellDigit(id, i) != centreDigit {
+				isCap = false
+				break
+			}
 		}
 	}
 	if isCap {
 		return ShapeCap
 	}
 
-	// Dart check 1: all digits in main diagonal {0, 4, 8}
+	// Dart Check 1 (Main Diagonal: i * (N + 1))
 	isDart1 := true
 	for i := uint8(0); i < res; i++ {
-		shift := 52 - (i * 4)
-		d := uint8((rawID >> shift) & SubCellMask)
-		if d != 0 && d != 4 && d != 8 {
+		digit := extractSubCellDigit(id, i)
+		if !isOnMainDiagonal(digit, nside) {
 			isDart1 = false
 			break
 		}
@@ -123,12 +151,11 @@ func CellShape64(id CellID64) CellShape {
 		return ShapeDart
 	}
 
-	// Dart check 2: all digits in anti-diagonal {2, 4, 6}
+	// Dart Check 2 (Anti-Diagonal: (i + 1) * (N - 1))
 	isDart2 := true
 	for i := uint8(0); i < res; i++ {
-		shift := 52 - (i * 4)
-		d := uint8((rawID >> shift) & SubCellMask)
-		if d != 2 && d != 4 && d != 6 {
+		digit := extractSubCellDigit(id, i)
+		if !isOnAntiDiagonal(digit, nside) {
 			isDart2 = false
 			break
 		}
@@ -141,69 +168,54 @@ func CellShape64(id CellID64) CellShape {
 	return ShapeSkewQuad
 }
 
-// CellShape128 determines the geographic shape classification of a CellID128.
-func CellShape128(id CellID128) CellShape {
-	facet := id.Facet()
-	// equatorial facets (O, P, Q, R -> Facets 1..4) are always standard quads
-	if facet >= 1 && facet <= 4 {
-		return ShapeQuad
+// FacetRegion determines the CellRegion directly from a base facet index (0..5).
+// Equatorial, North Polar, or South Polar
+func FacetRegion(facet uint8) CellRegion {
+	switch facet {
+	case 0:
+		return RegionNorthPolar
+	case 5:
+		return RegionSouthPolar
+	default:
+		return RegionEquatorial
 	}
+}
 
-	res := id.Resolution()
-	if res == 0 {
-		return ShapeQuad
-	}
+// --- Internal Mathematical Helpers ---
 
-	// helper to extract a 4-bit sub-cell digit from 128-bit ID
-	getDigit := func(i uint8) uint8 {
+// extractSubCellDigit extracts the 4-bit digit at resolution step i (0-indexed).
+func extractSubCellDigit[T CellID](id T, i uint8) uint8 {
+	var anyID any = id
+	switch v := anyID.(type) {
+	case CellID64:
+		shift := 52 - (i * 4)
+		return uint8((uint64(v) >> shift) & SubCellMask)
+	case CellID128:
 		if i < 14 {
 			shift := 52 - (i * 4)
-			return uint8((id.High >> shift) & SubCellMask)
+			return uint8((v.High >> shift) & SubCellMask)
 		}
 		shift := 60 - ((i - 14) * 4)
-		return uint8((id.Low >> shift) & SubCellMask)
+		return uint8((v.Low >> shift) & SubCellMask)
 	}
+	return 0
+}
 
-	// Cap check: all digits must be 4
-	isCap := true
-	for i := uint8(0); i < res; i++ {
-		if getDigit(i) != 4 {
-			isCap = false
-			break
-		}
-	}
-	if isCap {
-		return ShapeCap
-	}
+// isOnMainDiagonal checks if a sub-cell digit falls into S1 = {i * (N + 1) for i in 0..N-1}.
+func isOnMainDiagonal(digit uint8, nside uint16) bool {
+	d := uint16(digit)
+	step := nside + 1
+	return (d%step) == 0 && (d/step) < nside
+}
 
-	// Dart check 1: all digits in main diagonal {0, 4, 8}
-	isDart1 := true
-	for i := uint8(0); i < res; i++ {
-		d := getDigit(i)
-		if d != 0 && d != 4 && d != 8 {
-			isDart1 = false
-			break
-		}
+// isOnAntiDiagonal checks if a sub-cell digit falls into S2 = {(i + 1) * (N - 1) for i in 0..N-1}.
+func isOnAntiDiagonal(digit uint8, nside uint16) bool {
+	d := uint16(digit)
+	step := nside - 1
+	if step == 0 || d == 0 {
+		return d == 0
 	}
-	if isDart1 {
-		return ShapeDart
-	}
-
-	// Dart check 2: all digits in anti-diagonal {2, 4, 6}
-	isDart2 := true
-	for i := uint8(0); i < res; i++ {
-		d := getDigit(i)
-		if d != 2 && d != 4 && d != 6 {
-			isDart2 = false
-			break
-		}
-	}
-	if isDart2 {
-		return ShapeDart
-	}
-
-	// fallback: must be a Skew Quad
-	return ShapeSkewQuad
+	return (d%step) == 0 && (d/step) <= nside && (d/step) > 0
 }
 
 // --- Generic Utility Functions ---

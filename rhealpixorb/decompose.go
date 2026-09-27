@@ -13,7 +13,7 @@ import (
 // decomposeCell recursively decomposes an rHEALPix tree branch against a query BBox.
 // Fully enclosed cells emit 1D [Min, Max] SubtreeRanges immediately, short-circuiting recursion.
 func decomposeCell(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	cell rhealpix.CellID64,
 	bound orb.Bound,
 	targetRes uint8,
@@ -21,7 +21,7 @@ func decomposeCell(
 ) {
 	currentRes := cell.Resolution()
 
-	cellBound, err := Cell64ToBound(el, cell)
+	cellBound, err := Cell64ToBound(d, cell)
 	if err != nil {
 		return
 	}
@@ -54,14 +54,14 @@ func decomposeCell(
 		if err != nil {
 			continue
 		}
-		decomposeCell(el, childCell, bound, targetRes, ranges)
+		decomposeCell(d, childCell, bound, targetRes, ranges)
 	}
 }
 
 // decomposeCell128 recursively decomposes an rHEALPix tree branch against a query BBox.
 // Fully enclosed cells emit 1D [Min, Max] SubtreeRanges immediately, short-circuiting recursion.
 func decomposeCell128(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	cell rhealpix.CellID128,
 	bound orb.Bound,
 	targetRes uint8,
@@ -69,7 +69,7 @@ func decomposeCell128(
 ) {
 	currentRes := cell.Resolution()
 
-	cellBound, err := Cell128ToBound(el, cell)
+	cellBound, err := Cell128ToBound(d, cell)
 	if err != nil {
 		return
 	}
@@ -98,7 +98,7 @@ func decomposeCell128(
 		if err != nil {
 			continue
 		}
-		decomposeCell128(el, childCell, bound, targetRes, ranges)
+		decomposeCell128(d, childCell, bound, targetRes, ranges)
 	}
 }
 
@@ -112,7 +112,7 @@ func decomposeCell128(
 // Note: STACGeometryToTileDBRangesTopDown in walk.go is preferred for ingestion pipelines
 // as it performs exact planar [0, 1] x [0, 1] decomposition.
 func decomposePolygon(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	cell rhealpix.CellID64,
 	poly orb.Polygon,
 	polyBound orb.Bound,
@@ -121,7 +121,7 @@ func decomposePolygon(
 ) {
 	currentRes := cell.Resolution()
 
-	cellBound, err := Cell64ToBound(el, cell)
+	cellBound, err := Cell64ToBound(d, cell)
 	if err != nil {
 		return
 	}
@@ -155,13 +155,13 @@ func decomposePolygon(
 		if err != nil {
 			continue
 		}
-		decomposePolygon(el, childCell, poly, polyBound, targetRes, rawCells)
+		decomposePolygon(d, childCell, poly, polyBound, targetRes, rawCells)
 	}
 }
 
 // decomposePolygon128 recursively decomposes an rHEALPix tree branch against a polygon footprint.
 func decomposePolygon128(
-	el *rhealpix.Ellipsoid,
+	d *rhealpix.RhpDGGS,
 	cell rhealpix.CellID128,
 	poly orb.Polygon,
 	polyBound orb.Bound,
@@ -170,7 +170,7 @@ func decomposePolygon128(
 ) {
 	currentRes := cell.Resolution()
 
-	cellBound, err := Cell128ToBound(el, cell)
+	cellBound, err := Cell128ToBound(d, cell)
 	if err != nil {
 		return
 	}
@@ -204,7 +204,7 @@ func decomposePolygon128(
 		if err != nil {
 			continue
 		}
-		decomposePolygon128(el, childCell, poly, polyBound, targetRes, rawCells)
+		decomposePolygon128(d, childCell, poly, polyBound, targetRes, rawCells)
 	}
 }
 
@@ -245,7 +245,7 @@ func boundsContains(outer, inner orb.Bound) bool {
 	return latInside && lonInside
 }
 
-// isCellFullyInsidePolygon tests if all 4 corners and center of cellBound sit strictly inside poly,
+// isCellFullyInsidePolygon tests if all 4 corners and centre of cellBound sit strictly inside poly,
 // AND verifies that no polygon boundary segments cut through the cell.
 func isCellFullyInsidePolygon(poly orb.Polygon, cellBound orb.Bound) bool {
 	if len(poly) == 0 {
