@@ -7,7 +7,7 @@ import (
 )
 
 // ForwardBatchParallel64 converts flat arrays of Lons/Lats into CellID64 keys concurrently.
-func ForwardBatchParallel64(el *Ellipsoid, lons, lats []float64, targetRes uint8, out []CellID64) error {
+func ForwardBatchParallel64(d *RhpDGGS, lons, lats []float64, targetRes uint8, out []CellID64) error {
 	n := len(lons)
 	if n == 0 {
 		return nil
@@ -46,7 +46,7 @@ func ForwardBatchParallel64(el *Ellipsoid, lons, lats []float64, targetRes uint8
 			_ = out[e-1]
 
 			for i := s; i < e; i++ {
-				id, err := ForwardTransform64(el, lons[i], lats[i], targetRes)
+				id, err := d.ForwardTransform64(lons[i], lats[i], targetRes)
 				if err != nil {
 					errOnce.Do(func() { firstErr = err })
 					return
@@ -61,7 +61,7 @@ func ForwardBatchParallel64(el *Ellipsoid, lons, lats []float64, targetRes uint8
 }
 
 // ForwardBatchParallel128 converts flat arrays of Lons/Lats into CellID128 keys concurrently.
-func ForwardBatchParallel128(el *Ellipsoid, lons, lats []float64, targetRes uint8, out []CellID128) error {
+func ForwardBatchParallel128(d *RhpDGGS, lons, lats []float64, targetRes uint8, out []CellID128) error {
 	n := len(lons)
 	if n == 0 {
 		return nil
@@ -100,7 +100,7 @@ func ForwardBatchParallel128(el *Ellipsoid, lons, lats []float64, targetRes uint
 			_ = out[e-1]
 
 			for i := s; i < e; i++ {
-				id, err := ForwardTransform128(el, lons[i], lats[i], targetRes)
+				id, err := d.ForwardTransform128(lons[i], lats[i], targetRes)
 				if err != nil {
 					errOnce.Do(func() { firstErr = err })
 					return
