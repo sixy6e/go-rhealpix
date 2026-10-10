@@ -5,13 +5,14 @@ import (
 	"math"
 )
 
-// NormaliseLongitudeRad normalises any longitude in radians into the canonical [-pi, pi) range.
+// NormaliseLongitudeRad normalises any longitude in radians into [-pi, pi).
 func NormaliseLongitudeRad(lonRad float64) float64 {
-	lon := math.Mod(lonRad+Pi, TwoPi)
-	if lon < 0 {
-		lon += TwoPi
-	}
-	return lon - Pi
+	return lonRad - math.Floor((lonRad+Pi)/TwoPi)*TwoPi
+}
+
+// NormaliseLonDeg normalises any longitude in degrees into [-180, 180).
+func NormaliseLonDeg(lonDeg float64) float64 {
+	return lonDeg - math.Floor((lonDeg+180.0)/360.0)*360.0
 }
 
 // ForwardProject converts geodetic longitude and latitude (in degrees)
@@ -46,7 +47,7 @@ func (d *RhpDGGS) ForwardProjectForcedRegion(lonRad, latRad float64, region Cell
 	lon := d.ellipsoid.NormaliseLongitude(lonRad)
 	beta := d.ellipsoid.AuthLat(latRad)
 
-	// Seam check: if point sits on/near either seam, force exact Beta0 with matching sign
+	// seam check: if point sits on/near either seam, force exact Beta0 with matching sign
 	if math.Abs(math.Abs(beta)-d.ellipsoid.Beta0) < EPS_SEAM_RAD {
 		sign := 1.0
 		if beta < 0 {
@@ -55,18 +56,14 @@ func (d *RhpDGGS) ForwardProjectForcedRegion(lonRad, latRad float64, region Cell
 
 		switch region {
 		case RegionNorthPolar:
-			fmt.Println("Forcing North Region")
 			x, y := d.healpixSpherePolar(lon, d.ellipsoid.Beta0)
-			fmt.Printf("x: %v, y: %v\n", x, y)
 			return d.CombineTrianglesWithFacet(x, y, false, lon, region)
 
 		case RegionSouthPolar:
-			fmt.Println("Forcing South Region")
 			x, y := d.healpixSpherePolar(lon, -d.ellipsoid.Beta0)
 			return d.CombineTrianglesWithFacet(x, y, false, lon, region)
 
 		case RegionEquatorial:
-			fmt.Println("Forcing Equatorial Region")
 			x, y := d.healpixSphereEquatorial(lon, sign*d.ellipsoid.Beta0)
 			return d.CombineTrianglesWithFacet(x, y, false, lon, region)
 		}
@@ -316,13 +313,13 @@ func (d *RhpDGGS) LonLatToPlanar(facetID uint8, lonDeg, latDeg float64) (xLocal,
 //  1. Forward HEALPix Projection Space (inverse = false):
 //     The 4 northern and 4 southern polar cap regions exist as triangular fins (0, 1, 2, 3):
 //
-//     *       *       *       *
-//     * 0 *   * 1 *   * 2 *   * 3 *     <- North Polar Triangles
-//     *-------*-------*-------*-------*
-//     |   1   |   2   |   3   |   4   |   <- Equatorial Facets (1..4)
-//     *-------*-------*-------*-------*
-//     * 0 *   * 1 *   * 2 *   * 3 *     <- South Polar Triangles
-//     *       *       *       *
+// //          *       *       *       *
+// //        * 0 *   * 1 *   * 2 *   * 3 *     <- North Polar Triangles
+// //	   *-------*-------*-------*-------*
+// //	   |   1   |   2   |   3   |   4   |   <- Equatorial Facets (1..4)
+// //	   *-------*-------*-------*-------*
+// //        * 0 *   * 1 *   * 2 *   * 3 *     <- South Polar Triangles
+// //          *       *       *       *
 //
 //  2. Inverse rHEALPix Projection Space (inverse = true):
 //     The triangular fins are rearranged into square polar cap facets (Facet 0 North, Facet 5 South).
@@ -415,8 +412,6 @@ func TrianglePolarSector(x float64) int8 {
 		return 3
 	}
 }
-
-// ------------------ CLEAN UP: Follow PROJ and rhealpixdggs-py More Closely ---------------------
 
 // healpixSpherePolar handles pure Polar Cap math for both North and South caps.
 func (d *RhpDGGS) healpixSpherePolar(lonRad, beta float64) (x, y float64) {
