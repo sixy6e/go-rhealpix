@@ -35,10 +35,10 @@ const (
 	EPS_DOMAIN = 1e-15
 
 	// EPS_SEAM_RAD: Radian tolerance for snapping geodetic latitude to the authalic seam
-	// Prevents double-precision roundtrip noise between AuthLat and AuthLatInverse (~1cm on Earth)
+	// Prevents double-precision roundtrip noise between AuthLat and AuthLatInverse
 	EPS_SEAM_RAD = 1e-11
 
-	// EPS_SEAM_DEG: Degree tolerance for snapping geographic split points (~1cm on Earth)
+	// EPS_SEAM_DEG: Degree tolerance for snapping geographic split points
 	EPS_SEAM_DEG = 1e-7
 
 	// EPS_CLIP_BOUND: Planar bounding box inflation tolerance
@@ -49,7 +49,7 @@ const (
 	// projection boundaries pass domain validation despite floating-point noise.
 	EPS_IMAGE = 1e-10
 
-	// Epsilon for planar radians and absorbs float64 arithmetic noise (~0.06mm on Earth)
+	// Epsilon for planar radians and absorbs float64 arithmetic noise
 	EPS_PLANAR = 1e-11
 )
 
@@ -59,6 +59,16 @@ type BaseFacetBounds struct {
 	ULX, ULY float64 // Upper-Left corner (x, y)
 	Width    float64 // Planar width
 	Height   float64 // Planar height
+}
+
+// GeographicFacetDomain holds the exact unprojected geographic box and forced region.
+type GeographicFacetDomain struct {
+	FacetID uint8
+	MinLon  float64
+	MaxLon  float64
+	MinLat  float64
+	MaxLat  float64
+	Region  CellRegion
 }
 
 // RhpDGGS encapsulates the full configuration, ellipsoid parametres,
@@ -72,7 +82,10 @@ type RhpDGGS struct {
 	maxArealResolution float64 // Targeted max area in m²
 	maxResolution      uint8   // Derived max grid depth level
 
+	// Planar authalic radian extents
 	baseFacetBounds [6]BaseFacetBounds
+	// Unprojected geographic degree extents
+	geoFacetDomains [6]GeographicFacetDomain
 
 	// Area in m² of a Level 0 base facet (4 * Pi * R_A^2 / 6 = 2/3 * Pi * R_A^2)
 	baseFacetArea float64
@@ -163,6 +176,9 @@ func NewRhpDGGS(opts ...RhpOption) *RhpDGGS {
 		dggs.baseFacetBounds[f] = GetBaseFacetBounds(f, int(dggs.northSquare), int(dggs.southSquare))
 	}
 
+	// pre-calculate fixed geographic base facet domains
+	dggs.initGeographicFacetDomains()
+
 	return dggs
 }
 
@@ -204,7 +220,6 @@ func GetBaseFacetBounds(facet uint8, northSquare, southSquare int) BaseFacetBoun
 	case 0: // Facet N (North Cap)
 		ulX := -Pi + float64(northSquare)*HalfPi
 		return BaseFacetBounds{ULX: ulX, ULY: ThreeQtrPi, Width: HalfPi, Height: HalfPi}
-		// return BaseFacetBounds{ULX: ulX, ULY: ThreeQtrPi, Width: Pi, Height: HalfPi} // very wrong, just attempting to correct for triangular shaped overshoots and undershoots.
 
 	case 1: // Facet O (Equatorial)
 		return BaseFacetBounds{ULX: -Pi, ULY: QuarterPi, Width: HalfPi, Height: HalfPi}
@@ -224,6 +239,31 @@ func GetBaseFacetBounds(facet uint8, northSquare, southSquare int) BaseFacetBoun
 
 	default:
 		panic("invalid facet ID")
+	}
+}
+
+// initGeographicFacetDomains populates the 6 canonical geographic cutting domains.
+func (d *RhpDGGS) initGeographicFacetDomains() {
+	lon0Deg := d.ellipsoid.Lon0 * RadToDeg
+	phi0Deg := d.ellipsoid.Phi0 * RadToDeg
+
+	m1 := NormaliseLonDeg(lon0Deg - 180.0)
+	m2 := NormaliseLonDeg(lon0Deg - 90.0)
+	m3 := NormaliseLonDeg(lon0Deg)
+	m4 := NormaliseLonDeg(lon0Deg + 90.0)
+
+	d.geoFacetDomains = [6]GeographicFacetDomain{
+		// Facet 0: North Cap
+		{FacetID: 0, MinLon: -180.0, MaxLon: 180.0, MinLat: phi0Deg, MaxLat: 90.0, Region: RegionNorthPolar},
+
+		// Facets 1..4: Equatorial Belt (O, P, Q, R)
+		{FacetID: 1, MinLon: m1, MaxLon: m2, MinLat: -phi0Deg, MaxLat: phi0Deg, Region: RegionEquatorial},
+		{FacetID: 2, MinLon: m2, MaxLon: m3, MinLat: -phi0Deg, MaxLat: phi0Deg, Region: RegionEquatorial},
+		{FacetID: 3, MinLon: m3, MaxLon: m4, MinLat: -phi0Deg, MaxLat: phi0Deg, Region: RegionEquatorial},
+		{FacetID: 4, MinLon: m4, MaxLon: 180.0, MinLat: -phi0Deg, MaxLat: phi0Deg, Region: RegionEquatorial},
+
+		// Facet 5: South Cap
+		{FacetID: 5, MinLon: -180.0, MaxLon: 180.0, MinLat: -90.0, MaxLat: -phi0Deg, Region: RegionSouthPolar},
 	}
 }
 
@@ -250,6 +290,55 @@ func (d *RhpDGGS) MustFacetBounds(facet uint8) BaseFacetBounds {
 		panic(fmt.Sprintf("invalid facet ID: %d (must be 0..5)", facet))
 	}
 	return d.baseFacetBounds[facet]
+}
+
+// GeographicFacetDomains returns a slice of all 6 pre-calculated geographic domain boxes.
+func (d *RhpDGGS) GeographicFacetDomains() []GeographicFacetDomain {
+	return d.geoFacetDomains[:]
+}
+
+// GeographicFacetDomain returns the geographic domain box for a specific facet [0..5].
+func (d *RhpDGGS) GeographicFacetDomain(facet uint8) (GeographicFacetDomain, error) {
+	if facet > 5 {
+		return GeographicFacetDomain{}, fmt.Errorf("invalid facet ID: %d (must be 0..5)", facet)
+	}
+	return d.geoFacetDomains[facet], nil
+}
+
+// GeographicFacetClippingDomains returns all domain boxes used for Sutherland-Hodgman clipping,
+// extending the 6 canonical facet domains with the two antimeridian wrap-around boxes.
+func (d *RhpDGGS) GeographicFacetClippingDomains() []GeographicFacetDomain {
+	phi0Deg := d.ellipsoid.Phi0 * RadToDeg
+
+	// allocate slice with capacity for all 8 clipping boxes
+	clippingDomains := make([]GeographicFacetDomain, 0, 8)
+
+	// append the 6 canonical pre-calculated domains [0..5]
+	clippingDomains = append(clippingDomains, d.geoFacetDomains[:]...)
+
+	// append the 2 extended antimeridian wrap domains
+	clippingDomains = append(clippingDomains,
+		// Antimeridian East Wrap: [180, 270] -> Belongs to Facet 1 (O)
+		GeographicFacetDomain{
+			FacetID: 1,
+			MinLon:  180.0,
+			MaxLon:  270.0,
+			MinLat:  -phi0Deg,
+			MaxLat:  phi0Deg,
+			Region:  RegionEquatorial,
+		},
+		// Antimeridian West Wrap: [-270, -180] -> Belongs to Facet 4 (R)
+		GeographicFacetDomain{
+			FacetID: 4,
+			MinLon:  -270.0,
+			MaxLon:  -180.0,
+			MinLat:  -phi0Deg,
+			MaxLat:  phi0Deg,
+			Region:  RegionEquatorial,
+		},
+	)
+
+	return clippingDomains
 }
 
 // --- Convenience Helpers on BaseFacetBounds ---
