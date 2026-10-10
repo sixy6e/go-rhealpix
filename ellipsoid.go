@@ -144,9 +144,8 @@ func NewWGS84() *Ellipsoid {
 }
 
 // NormaliseLongitude adjusts longitude (in radians) relative to Lon0 into [-pi, pi).
-func (e *Ellipsoid) NormaliseLongitude(lon float64) float64 {
-	dLon := lon - e.Lon0
-	return dLon - math.Floor((dLon+Pi)/TwoPi)*TwoPi
+func (e *Ellipsoid) NormaliseLongitude(lonRad float64) float64 {
+	return NormaliseLongitudeRad(lonRad - e.Lon0)
 }
 
 // AuthLat computes authalic latitude (beta in radians) from geodetic latitude (phi in radians).
