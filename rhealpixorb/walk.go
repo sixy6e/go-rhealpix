@@ -2,6 +2,7 @@ package rhealpixorb
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/paulmach/orb"
 	rhealpix "github.com/sixy6e/go-rhealpix"
@@ -404,7 +405,9 @@ func projectPolygonToPlanar(d *rhealpix.RhpDGGS, facetID uint8, poly orb.Polygon
 	return projected
 }
 
-// ForwardProjectPolygon densifies long edges and projects geographic points directly through RhpDGGS.
+// ForwardProjectPolygon projects geographic points directly through RhpDGGS.
+// TODO: cleanup; this is replaced with ForwardProjectPolygonForcedRegion
+// to enforce topological correctness for geometry structures.
 func ForwardProjectPolygon(d *rhealpix.RhpDGGS, poly orb.Polygon) orb.Polygon {
 	if len(poly) == 0 {
 		return nil
@@ -413,13 +416,10 @@ func ForwardProjectPolygon(d *rhealpix.RhpDGGS, poly orb.Polygon) orb.Polygon {
 	projected := make(orb.Polygon, len(poly))
 
 	for i, ring := range poly {
-		// densify segment edges to prevent planar curvature bowing
-		// denseRing := densifyRing(ring, 0.05) // ~5km step size
-		denseRing := densifyRing(ring, 0.02) // ~2km step size
 
 		// project directly via standard 3-stage ForwardProjectRadians
-		projectedRing := make(orb.Ring, 0, len(denseRing))
-		for _, pt := range denseRing {
+		projectedRing := make(orb.Ring, 0, len(ring))
+		for _, pt := range ring {
 			lonRad := pt.X() * rhealpix.DegToRad
 			latRad := pt.Y() * rhealpix.DegToRad
 
@@ -434,8 +434,9 @@ func ForwardProjectPolygon(d *rhealpix.RhpDGGS, poly orb.Polygon) orb.Polygon {
 	return projected
 }
 
-// ForwardProjectPolygon densifies long edges and projects geographic points directly through RhpDGGS.
-func ForwardProjectPolygonForcedRegion(d *rhealpix.RhpDGGS, poly orb.Polygon, region rhealpix.CellRegion) orb.Polygon {
+// ForwardProjectPolygonForcedRegion projects geographic polygon points through RhpDGGS
+// using forced regional context, maintaining seam alignment.
+func ForwardProjectPolygonForcedRegion(d *rhealpix.RhpDGGS, poly orb.Polygon, dom rhealpix.GeographicFacetDomain) orb.Polygon {
 	if len(poly) == 0 {
 		return nil
 	}
@@ -443,22 +444,28 @@ func ForwardProjectPolygonForcedRegion(d *rhealpix.RhpDGGS, poly orb.Polygon, re
 	projected := make(orb.Polygon, len(poly))
 
 	for i, ring := range poly {
-		// densify segment edges to prevent planar curvature bowing
-		// denseRing := densifyRing(ring, 0.05) // ~5km step size
-		denseRing := densifyRing(ring, 0.02) // ~2km step size
-		fmt.Println("Geo Ring Point Count:", len(denseRing))
-
-		// project directly via standard 3-stage ForwardProjectRadians
-		projectedRing := make(orb.Ring, 0, len(denseRing))
-		for _, pt := range denseRing {
-			lonRad := pt.X() * rhealpix.DegToRad
+		projectedRing := make(orb.Ring, 0, len(ring))
+		for _, pt := range ring {
+			lonDeg := pt.X()
 			latRad := pt.Y() * rhealpix.DegToRad
 
-			// pure projection call: HealpixSphere -> Seam Lock -> combineTriangles
-			xRhp, yRhp, _ := d.ForwardProjectForcedRegion(lonRad, latRad, region)
+			// preserve +180° as +pi for Facet 4 (or any domain whose MaxLon == 180.0)
+			var lonRad float64
+			if dom.MaxLon == 180.0 && math.Abs(lonDeg-180.0) < 1e-11 {
+				lonRad = math.Pi // keep strictly +pi!
+			} else {
+				lonRad = lonDeg * rhealpix.DegToRad
+			}
+
+			xRhp, yRhp, _ := d.ForwardProjectForcedRegion(lonRad, latRad, dom.Region)
+
+			// HARD LOCK: If this point is on the +180° seam for Facet 4, force X_RHP = +pi
+			if dom.MaxLon == 180.0 && math.Abs(lonDeg-180.0) < 1e-11 {
+				xRhp = math.Pi
+			}
+
 			projectedRing = append(projectedRing, orb.Point{xRhp, yRhp})
 		}
-
 		projected[i] = projectedRing
 	}
 
@@ -470,13 +477,13 @@ func PartitionPolygonToCells(d *rhealpix.RhpDGGS, inputGeom orb.Geometry, target
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("len(facetSubGeoms):", len(facetSubGeoms))
+	// fmt.Println("len(facetSubGeoms):", len(facetSubGeoms))
 
 	rawCells := make([]rhealpix.CellID64, 0, 128)
 	rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
 
 	for _, sub := range facetSubGeoms {
-		fmt.Println("sub.FacetID:", sub.FacetID)
+		// fmt.Println("sub.FacetID:", sub.FacetID)
 
 		rootCell, err := rhealpix.PackCellID64(sub.FacetID, 0, nil)
 		if err != nil {
@@ -487,9 +494,37 @@ func PartitionPolygonToCells(d *rhealpix.RhpDGGS, inputGeom orb.Geometry, target
 		localGeom := PlanarToLocalUVGeometry(d, sub.FacetID, sub.Geometry)
 
 		// prepare local geometry & perform quadtree walk inside [0, 1] x [0, 1]
-		// rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
 		prep := NewPreparedGeometry(localGeom)
 		rawCells = WalkPlanarCellGeneric(d, rootCell, rootBox, prep, targetRes, rawCells)
+	}
+
+	return rawCells, nil
+}
+
+func PartitionPolygonToCells128(d *rhealpix.RhpDGGS, inputGeom orb.Geometry, targetRes uint8) ([]rhealpix.CellID128, error) {
+	facetSubGeoms, err := ClipGeometryToFacets(d, inputGeom)
+	if err != nil {
+		return nil, err
+	}
+	// fmt.Println("len(facetSubGeoms):", len(facetSubGeoms))
+
+	rawCells := make([]rhealpix.CellID128, 0, 128)
+	rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
+
+	for _, sub := range facetSubGeoms {
+		// fmt.Println("sub.FacetID:", sub.FacetID)
+
+		rootCell, err := rhealpix.PackCellID128(sub.FacetID, 0, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		// transform global planar radians -> Local [0, 1] Facet UV
+		localGeom := PlanarToLocalUVGeometry(d, sub.FacetID, sub.Geometry)
+
+		// prepare local geometry & perform quadtree walk inside [0, 1] x [0, 1]
+		prep := NewPreparedGeometry(localGeom)
+		rawCells = WalkPlanarCellGeneric128(d, rootCell, rootBox, prep, targetRes, rawCells)
 	}
 
 	return rawCells, nil
@@ -535,6 +570,7 @@ func transformPolygonUV(d *rhealpix.RhpDGGS, facetID uint8, poly orb.Polygon) or
 // WalkPlanarCell recursively walks the rHEALPix nonary tree in local planar space.
 // Similar methodology to Uber's H3 PolyFill. But simpler as we have squares, not overlapping
 // hexagons and pentagons.
+// Only works for 3x3 sided case.
 // TODO; test dart shaped cells.
 func WalkPlanarCell(
 	cell rhealpix.CellID64,
@@ -572,6 +608,10 @@ func WalkPlanarCell(
 	return results
 }
 
+// WalkPlanarCellGeneric recursively walks the rHEALPix nonary tree in local planar space.
+// Similar methodology to Uber's H3 PolyFill. But simpler as we have squares, not overlapping
+// hexagons and pentagons.
+// Works for generic n-sided case, eg 2x2 or 3x3.
 func WalkPlanarCellGeneric(
 	d *rhealpix.RhpDGGS,
 	cell rhealpix.CellID64,
@@ -594,7 +634,7 @@ func WalkPlanarCellGeneric(
 			return append(results, cell)
 		}
 
-		// Dynamically subdivide into N x N children
+		// dynamically subdivide into N x N children
 		childBoxes := box.Subdivide(d.Nside())
 		numChildren := uint8(len(childBoxes))
 
@@ -629,59 +669,24 @@ func STACGeometryToTileDBRangesTopDown(
 	geom orb.Geometry,
 	targetRes uint8,
 ) ([]rhealpix.CellID64, error) {
-	facetSubGeoms, err := ClipGeometryToFacets(d, geom)
-	if err != nil {
-		return nil, fmt.Errorf("failed clipping geometry to facets: %w", err)
-	}
-
-	// pre-allocate rawCells slice capacity (128 entries) to avoid dynamic growth allocations
-	rawCells := make([]rhealpix.CellID64, 0, 128)
-	rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
-
-	for _, sub := range facetSubGeoms {
-		rootCell, err := rhealpix.PackCellID64(sub.FacetID, 0, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		planarGeom := projectGeometryToPlanar(d, sub.FacetID, sub.Geometry)
-		if planarGeom == nil {
-			continue
-		}
-
-		prep := NewPreparedGeometry(planarGeom)
-		rawCells = WalkPlanarCell(rootCell, rootBox, prep, targetRes, rawCells)
-	}
-
-	compacted, err := rhealpix.Compact(rawCells)
-	if err != nil {
-		return nil, fmt.Errorf("failed compacting decomposed cells: %w", err)
-	}
-
-	return compacted, nil
-}
-
-// STACGeometryToTileDBRangesTopDown2 just a temporary func, whilst bugs are worked through
-func STACGeometryToTileDBRangesTopDown2(
-	d *rhealpix.RhpDGGS,
-	geom orb.Geometry,
-	targetRes uint8,
-) ([]rhealpix.CellID64, error) {
 	rawCells, err := PartitionPolygonToCells(d, geom, targetRes)
 	if err != nil {
 		return nil, fmt.Errorf("failed PartitionPolygonToCells: %w", err)
 	}
-	fmt.Println("len(rawCells): ", len(rawCells))
+
+	// fmt.Println("len(rawCells): ", len(rawCells))
 	compacted, err := rhealpix.Compact(rawCells)
 	if err != nil {
 		return nil, fmt.Errorf("failed compacting decomposed cells: %w", err)
 	}
+
 	return compacted, nil
 }
 
 // WalkPlanarCell128 recursively walks the rHEALPix nonary tree in local planar space using 128-bit cell IDs.
 // Similar methodology to Uber's H3 PolyFill. But simpler as we have squares, not overlapping
 // hexagons and pentagons.
+// Only works for 3x3 sided case.
 // TODO; test dart shaped cells.
 func WalkPlanarCell128(
 	cell rhealpix.CellID128,
@@ -719,6 +724,49 @@ func WalkPlanarCell128(
 	return results
 }
 
+// WalkPlanarCellGeneric128 recursively walks the rHEALPix nonary tree in local planar space using 128-bit cell IDs.
+// Similar methodology to Uber's H3 PolyFill. But simpler as we have squares, not overlapping
+// hexagons and pentagons.
+// Works for generic n-sided case, eg 2x2 or 3x3.
+func WalkPlanarCellGeneric128(
+	d *rhealpix.RhpDGGS,
+	cell rhealpix.CellID128,
+	box PlanarBox,
+	prep PreparedGeometry,
+	targetRes uint8,
+	results []rhealpix.CellID128,
+) []rhealpix.CellID128 {
+	relation := EvaluateBoxRelation(box, prep)
+
+	switch relation {
+	case BoxOutside:
+		return results
+
+	case BoxInside:
+		return append(results, cell)
+
+	case BoxStraddles:
+		if cell.Resolution() >= targetRes {
+			return append(results, cell)
+		}
+
+		// dynamically subdivide into N x N children
+		childBoxes := box.Subdivide(d.Nside())
+		numChildren := uint8(len(childBoxes))
+
+		for i := uint8(0); i < numChildren; i++ {
+			childCell, err := cell.Child(i)
+			if err != nil {
+				continue
+			}
+
+			results = WalkPlanarCellGeneric128(d, childCell, childBoxes[i], prep, targetRes, results)
+		}
+	}
+
+	return results
+}
+
 // STACGeometryToTileDBRangesTopDown128 performs top-down nonary tree spatial decomposition
 // of a WGS84 geometry into a compacted set of 128-bit rHEALPix cell IDs up to targetRes.
 //
@@ -737,30 +785,12 @@ func STACGeometryToTileDBRangesTopDown128(
 	geom orb.Geometry,
 	targetRes uint8,
 ) ([]rhealpix.CellID128, error) {
-	facetSubGeoms, err := ClipGeometryToFacets(d, geom)
+	rawCells, err := PartitionPolygonToCells128(d, geom, targetRes)
 	if err != nil {
-		return nil, fmt.Errorf("failed clipping geometry to facets: %w", err)
+		return nil, fmt.Errorf("failed PartitionPolygonToCells: %w", err)
 	}
 
-	// pre-allocate rawCells slice capacity (128 entries) to avoid dynamic growth allocations
-	rawCells := make([]rhealpix.CellID128, 0, 128)
-	rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
-
-	for _, sub := range facetSubGeoms {
-		rootCell, err := rhealpix.PackCellID128(sub.FacetID, 0, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		planarGeom := projectGeometryToPlanar(d, sub.FacetID, sub.Geometry)
-		if planarGeom == nil {
-			continue
-		}
-
-		prep := NewPreparedGeometry(planarGeom)
-		rawCells = WalkPlanarCell128(rootCell, rootBox, prep, targetRes, rawCells)
-	}
-
+	// fmt.Println("len(rawCells): ", len(rawCells))
 	compacted, err := rhealpix.Compact(rawCells)
 	if err != nil {
 		return nil, fmt.Errorf("failed compacting decomposed cells: %w", err)

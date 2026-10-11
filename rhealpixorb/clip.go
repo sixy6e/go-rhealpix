@@ -16,8 +16,8 @@ type FacetSubGeometry struct {
 }
 
 // UnwrapPolygon converts longitude jumps (>180°) into a continuous coordinate series
-// across the anti-meridian without altering ring topology or orientation.
-func UnwrapPolygon(poly orb.Polygon) orb.Polygon {
+// relative to a central meridian lon0Deg, preserving ring topology.
+func UnwrapPolygon(poly orb.Polygon, lon0Deg float64) orb.Polygon {
 	if len(poly) == 0 {
 		return poly
 	}
@@ -28,13 +28,23 @@ func UnwrapPolygon(poly orb.Polygon) orb.Polygon {
 		if len(ring) < 2 {
 			continue
 		}
+
+		// shift initial vertex relative to lon0Deg into [-180, 180)
+		ring[0][0] = rhealpix.NormaliseLonDeg(ring[0][0] - lon0Deg)
+
+		// walk ring and unwrap relative continuous steps
 		for i := 1; i < len(ring); i++ {
-			diff := ring[i][0] - ring[i-1][0]
+			// normalise relative to lon0Deg before checking delta
+			currLon := rhealpix.NormaliseLonDeg(ring[i][0] - lon0Deg)
+			prevLon := ring[i-1][0]
+
+			diff := currLon - prevLon
 			if diff > 180.0 {
-				ring[i][0] -= 360.0
+				currLon -= 360.0
 			} else if diff < -180.0 {
-				ring[i][0] += 360.0
+				currLon += 360.0
 			}
+			ring[i][0] = currLon
 		}
 	}
 	return out
@@ -56,11 +66,7 @@ func DeepClonePolygon(p orb.Polygon) orb.Polygon {
 
 // normaliseLonDeg wraps unwrapped longitudes back to [-180, 180) for domain checks.
 func normaliseLonDeg(lon float64) float64 {
-	lon = math.Mod(lon+180.0, 360.0)
-	if lon < 0 {
-		lon += 360.0
-	}
-	return lon - 180.0
+	return rhealpix.NormaliseLonDeg(lon)
 }
 
 // facetIntersectsBound performs a geodetic bounding box check against
@@ -210,37 +216,32 @@ func splitPolygonAtLatitude(poly orb.Polygon, splitLat float64) (northPoly, sout
 	return ensurePolygonCCW(northPoly), ensurePolygonCCW(southPoly)
 }
 
-func testNS(d *rhealpix.RhpDGGS, latRad float64) {
-	beta0 := d.GetEllipsoid().Beta0
-	aulat := d.GetEllipsoid().AuthLat(latRad)
-	deg := aulat * rhealpix.RadToDeg
-	if math.Abs(aulat) <= beta0 {
-		fmt.Printf("Point is in equatorial region: lat: %v, authlat: %v, beta0: %v\n", latRad*rhealpix.RadToDeg, deg, beta0*rhealpix.RadToDeg)
-	} else {
-		fmt.Printf("Point is in polar region: lat: %v, authlat: %v, beta0: %v\n", latRad*rhealpix.RadToDeg, deg, beta0*rhealpix.RadToDeg)
-	}
-}
-
 // ClipGeometryToFacets slices an input geographic geometry across the rHEALPix facet boundaries
 // (authalic cap parallels and equatorial meridians) and projects each piece into planar space.
+// It unwraps longitudes relative to Lon0, pre-densifies long segments, clips against
+// the 6 canonical geographic facet domain boxes, and projects each piece using exact forced regional context.
+// A key component for polygon ingestion.
 func ClipGeometryToFacets(d *rhealpix.RhpDGGS, geom orb.Geometry) ([]FacetSubGeometry, error) {
 	if geom == nil {
 		return nil, fmt.Errorf("nil input geometry")
 	}
 
+	// extract and unwrap polygons relative to Lon0
+	lon0Deg := d.GetEllipsoid().Lon0 * rhealpix.RadToDeg
 	var polys []orb.Polygon
+
 	switch g := geom.(type) {
 	case orb.Polygon:
-		polys = append(polys, UnwrapPolygon(g))
+		polys = append(polys, UnwrapPolygon(g, lon0Deg))
 	case orb.MultiPolygon:
 		for _, p := range g {
-			polys = append(polys, UnwrapPolygon(p))
+			polys = append(polys, UnwrapPolygon(p, lon0Deg))
 		}
 	default:
 		return nil, fmt.Errorf("unsupported geometry type %T", geom)
 	}
 
-	capLatDeg := d.GetEllipsoid().Phi0 * rhealpix.RadToDeg
+	domains := d.GeographicFacetClippingDomains()
 	var results []FacetSubGeometry
 
 	for _, poly := range polys {
@@ -249,82 +250,38 @@ func ClipGeometryToFacets(d *rhealpix.RhpDGGS, geom orb.Geometry) ([]FacetSubGeo
 			continue
 		}
 
-		geomBound := poly.Bound()
+		// densify long edges before slicing so curved seams retain shape
+		// 0.02 max step in degrees (~2km step size)
+		densePoly := densifyPolygon(poly, 0.02)
 
-		// --- Case A: Straddles North Cap Seam (+Phi0) ---
-		if geomBound.Min.Y() < capLatDeg && geomBound.Max.Y() > capLatDeg {
-			northGeo, southGeo := splitPolygonAtLatitude(poly, capLatDeg)
+		// direct pass against the 6 canonical geographic facet domain boxes
+		for _, dom := range domains {
+			clippedPolys := ClipPolygonToGeographicBox(densePoly, dom.MinLon, dom.MaxLon, dom.MinLat, dom.MaxLat)
 
-			// process North Polar Cap piece (Facet 0)
-			if len(northGeo) > 0 {
-				planarNorth := ForwardProjectPolygonForcedRegion(d, northGeo, rhealpix.RegionNorthPolar)
-				if planarNorth != nil {
-					results = append(results, FacetSubGeometry{FacetID: 0, Geometry: planarNorth})
+			for _, piece := range clippedPolys {
+				if len(piece) == 0 {
+					continue
+				}
+
+				// RE-DENSIFY the clipped piece so newly created seam edges get interpolated!
+				reDensifiedPiece := densifyPolygon(piece, 0.02)
+
+				// RE-NORMALISE longitudes back into [-180, 180) before forward projection
+				normPiece := normalisePolygonLongitudes(reDensifiedPiece, dom)
+
+				// project with exact forced regional context (North, Equatorial, or South)
+				planarGeom := ForwardProjectPolygonForcedRegion(d, normPiece, dom)
+				if planarGeom != nil {
+					results = append(results, FacetSubGeometry{
+						FacetID:  dom.FacetID,
+						Geometry: planarGeom,
+					})
 				}
 			}
-
-			// process Equatorial piece (Facets 1..4)
-			if len(southGeo) > 0 {
-				processEquatorialPiece(d, southGeo, &results)
-			}
-			continue
 		}
-
-		// --- Case B: Straddles South Cap Seam (-Phi0) ---
-		if geomBound.Min.Y() < -capLatDeg && geomBound.Max.Y() > -capLatDeg {
-			northGeo, southGeo := splitPolygonAtLatitude(poly, -capLatDeg)
-
-			if len(southGeo) > 0 {
-				planarSouth := ForwardProjectPolygonForcedRegion(d, southGeo, rhealpix.RegionSouthPolar)
-				if planarSouth != nil {
-					results = append(results, FacetSubGeometry{FacetID: 5, Geometry: planarSouth})
-				}
-			}
-
-			if len(northGeo) > 0 {
-				processEquatorialPiece(d, northGeo, &results)
-			}
-			continue
-		}
-
-		// --- Case C: Completely inside North Polar Cap (Facet 0) ---
-		if geomBound.Min.Y() >= capLatDeg {
-			planarPoly := ForwardProjectPolygonForcedRegion(d, poly, rhealpix.RegionNorthPolar)
-			if planarPoly != nil {
-				results = append(results, FacetSubGeometry{FacetID: 0, Geometry: planarPoly})
-			}
-			continue
-		}
-
-		// --- Case D: Completely inside South Polar Cap (Facet 5) ---
-		if geomBound.Max.Y() <= -capLatDeg {
-			planarPoly := ForwardProjectPolygonForcedRegion(d, poly, rhealpix.RegionSouthPolar)
-			if planarPoly != nil {
-				results = append(results, FacetSubGeometry{FacetID: 5, Geometry: planarPoly})
-			}
-			continue
-		}
-
-		// --- Case E: Entirely inside Equatorial Belt (Facets 1..4) ---
-		processEquatorialPiece(d, poly, &results)
 	}
 
 	return results, nil
-}
-
-// processEquatorialPiece partitions an equatorial polygon across longitude meridians and projects each piece.
-func processEquatorialPiece(d *rhealpix.RhpDGGS, poly orb.Polygon, results *[]FacetSubGeometry) {
-	eqPieces := partitionEquatorialPolygon(d, poly)
-	for _, piece := range eqPieces {
-		eqPoly, ok := piece.Geometry.(orb.Polygon)
-		if !ok || len(eqPoly) == 0 {
-			continue
-		}
-		planarEq := ForwardProjectPolygonForcedRegion(d, eqPoly, rhealpix.RegionEquatorial)
-		if planarEq != nil {
-			*results = append(*results, FacetSubGeometry{FacetID: piece.FacetID, Geometry: planarEq})
-		}
-	}
 }
 
 // SplitAtSectorMeridians splits segments crossing polar sector meridians
@@ -641,8 +598,7 @@ func splitRingAtLongitude(ring orb.Ring, targetLon float64) (orb.Ring, orb.Ring)
 	return leftRing, rightRing
 }
 
-// func ForwardProjectPointForFacet(d *rhealpix.RhpDGGS, facetID uint8, pt orb.Point) orb.Point {
-func ForwardProjectPointForFacet(d *rhealpix.RhpDGGS, facetID uint8, pt orb.Point) (xRhp, yRhp float64) {
+func ForwardProjectPointForFacet(d *rhealpix.RhpDGGS, facetID uint8, pt orb.Point) orb.Point {
 	lonRad := pt.X() * rhealpix.DegToRad
 	latRad := pt.Y() * rhealpix.DegToRad
 
@@ -667,7 +623,7 @@ func ForwardProjectPointForFacet(d *rhealpix.RhpDGGS, facetID uint8, pt orb.Poin
 	}
 
 	// ForwardProjectRadians handles NormaliseLongitude and AuthLat internally!
-	xRhp, yRhp, _ = d.ForwardProjectRadians(lonRad, latRad)
+	xRhp, yRhp, _ := d.ForwardProjectRadians(lonRad, latRad)
 
 	// hard-lock Y to exact facet boundary baseline ONLY when latitude is on the seam
 	if latRad == capLatRad {
@@ -688,6 +644,138 @@ func ForwardProjectPointForFacet(d *rhealpix.RhpDGGS, facetID uint8, pt orb.Poin
 		}
 	}
 
-	// return orb.Point{xRhp, yRhp}
-	return xRhp, yRhp
+	return orb.Point{xRhp, yRhp}
+}
+
+// normalisePolygonLongitudes wraps longitudes back into [dom.MinLon, dom.MaxLon]
+func normalisePolygonLongitudes(poly orb.Polygon, dom rhealpix.GeographicFacetDomain) orb.Polygon {
+	out := DeepClonePolygon(poly)
+	for r := range out {
+		for p := range out[r] {
+			lon := out[r][p][0]
+
+			// normalisation into [-180, 180)
+			lon = rhealpix.NormaliseLonDeg(lon)
+
+			// if the point lands on -180.0 but the domain expects +180.0 (e.g. Facet 4 / R)
+			if math.Abs(lon - -180.0) < 1e-11 && dom.MaxLon == 180.0 {
+				lon = 180.0
+			}
+
+			out[r][p][0] = lon
+		}
+	}
+	return out
+}
+
+// ClipPolygonToGeographicBox clips an orb.Polygon against an axis-aligned geographic box [minLon, maxLon] x [minLat, maxLat].
+func ClipPolygonToGeographicBox(poly orb.Polygon, minLon, maxLon, minLat, maxLat float64) []orb.Polygon {
+	if len(poly) == 0 {
+		return nil
+	}
+
+	var clippedRings []orb.Ring
+
+	for _, ring := range poly {
+		if len(ring) < 4 {
+			continue
+		}
+
+		// Sutherland-Hodgman sequential edge clipping: West, East, South, North
+		// TODO; after resolving issues with splitting at facet boundaries, check whether
+		// clipping via orb is doable or overkill for this level of clipping
+		r := clipRingToEdge(ring, 0, minLon, true) // Lon >= minLon
+		r = clipRingToEdge(r, 0, maxLon, false)    // Lon <= maxLon
+		r = clipRingToEdge(r, 1, minLat, true)     // Lat >= minLat
+		r = clipRingToEdge(r, 1, maxLat, false)    // Lat <= maxLat
+
+		r = removeDuplicatePoints(r)
+
+		// valid closed polygon ring requires at least 4 points (3 unique + 1 closing)
+		if len(r) >= 4 {
+			clippedRings = append(clippedRings, r)
+		}
+	}
+
+	if len(clippedRings) == 0 {
+		return nil
+	}
+
+	return []orb.Polygon{ensurePolygonCCW(orb.Polygon(clippedRings))}
+}
+
+// clipRingToEdge clips a ring against a single boundary plane (dim: 0=Lon, 1=Lat).
+func clipRingToEdge(ring orb.Ring, dim int, boundary float64, keepGreater bool) orb.Ring {
+	if len(ring) < 2 {
+		return nil
+	}
+
+	var output orb.Ring
+	numPts := len(ring)
+
+	for i := 0; i < numPts-1; i++ {
+		p1 := ring[i]
+		p2 := ring[i+1]
+
+		p1Inside := isPointInside(p1[dim], boundary, keepGreater)
+		p2Inside := isPointInside(p2[dim], boundary, keepGreater)
+
+		if p1Inside && p2Inside {
+			output = append(output, p2)
+		} else if p1Inside && !p2Inside {
+			intersect := intersectSegmentEdge(p1, p2, dim, boundary)
+			output = append(output, intersect)
+		} else if !p1Inside && p2Inside {
+			intersect := intersectSegmentEdge(p1, p2, dim, boundary)
+			output = append(output, intersect, p2)
+		}
+	}
+
+	if len(output) == 0 {
+		return nil
+	}
+
+	// close ring if open
+	if output[0][0] != output[len(output)-1][0] || output[0][1] != output[len(output)-1][1] {
+		output = append(output, output[0])
+	}
+
+	return output
+}
+
+func isPointInside(val, boundary float64, keepGreater bool) bool {
+	if keepGreater {
+		return val >= boundary
+	}
+	return val <= boundary
+}
+
+func intersectSegmentEdge(p1, p2 orb.Point, dim int, boundary float64) orb.Point {
+	t := (boundary - p1[dim]) / (p2[dim] - p1[dim])
+	otherDim := 1 - dim
+
+	otherVal := p1[otherDim] + t*(p2[otherDim]-p1[otherDim])
+
+	if dim == 0 { // clipped on Lon boundary
+		return orb.Point{boundary, otherVal}
+	}
+	// clipped on Lat boundary
+	return orb.Point{otherVal, boundary}
+}
+
+func removeDuplicatePoints(ring orb.Ring) orb.Ring {
+	if len(ring) < 2 {
+		return ring
+	}
+	out := make(orb.Ring, 0, len(ring))
+	out = append(out, ring[0])
+
+	for i := 1; i < len(ring); i++ {
+		prev := out[len(out)-1]
+		curr := ring[i]
+		if prev[0] != curr[0] || prev[1] != curr[1] {
+			out = append(out, curr)
+		}
+	}
+	return out
 }
