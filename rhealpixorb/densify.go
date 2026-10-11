@@ -281,14 +281,10 @@ func DensifyAndSplitAtBeta0(d *rhealpix.RhpDGGS, ring orb.Ring, maxStepDeg float
 	return densified
 }
 
-// densifySegment interpolates points starting at p1 up to (but not including) p2
+// densifySegment interpolates points starting at p1 up to (but not including) p2.
+// Points p1 and p2 must ALREADY be unwrapped relative to each other.
 func densifySegment(p1, p2 orb.Point, maxStepDeg float64) []orb.Point {
 	dLon := p2.X() - p1.X()
-	if dLon > 180.0 {
-		dLon -= 360.0
-	} else if dLon < -180.0 {
-		dLon += 360.0
-	}
 	dLat := p2.Y() - p1.Y()
 
 	distDeg := math.Hypot(dLon, dLat)
@@ -308,12 +304,7 @@ func densifySegment(p1, p2 orb.Point, maxStepDeg float64) []orb.Point {
 		x := p1.X() + t*dLon
 		y := p1.Y() + t*dLat
 
-		if x > 180.0 {
-			x -= 360.0
-		} else if x < -180.0 {
-			x += 360.0
-		}
-
+		// keep x in continuous unwrapped space! Do not wrap back into [-180, 180].
 		pts = append(pts, orb.Point{x, y})
 	}
 	return pts
@@ -333,6 +324,20 @@ func densifyRing(ring orb.Ring, maxStepDeg float64) orb.Ring {
 	}
 	if len(ring) > 0 {
 		densified = append(densified, ring[len(ring)-1])
+	}
+	return densified
+}
+
+// densifyPolygon samples intermediate points along every ring of an orb.Polygon
+// ensuring no segment exceeds maxStepDeg (in degrees).
+func densifyPolygon(poly orb.Polygon, maxStepDeg float64) orb.Polygon {
+	if len(poly) == 0 {
+		return poly
+	}
+
+	densified := make(orb.Polygon, len(poly))
+	for i, ring := range poly {
+		densified[i] = densifyRing(ring, maxStepDeg)
 	}
 	return densified
 }
