@@ -2,6 +2,7 @@ package rhealpixorb
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -14,11 +15,15 @@ import (
 // If segmentCount > 1, it densifies each cell edge into segmentCount linear steps in geographic space.
 func CellToPolygon[T rhealpix.CellID](d *rhealpix.RhpDGGS, id T, segmentCount int) (orb.Polygon, error) {
 	var isZero bool
+	var facet uint8
+
 	switch v := any(id).(type) {
 	case rhealpix.CellID64:
 		isZero = v.IsZero()
+		facet = v.Facet()
 	case rhealpix.CellID128:
 		isZero = v.IsZero()
+		facet = v.Facet()
 	}
 
 	if isZero {
@@ -44,11 +49,22 @@ func CellToPolygon[T rhealpix.CellID](d *rhealpix.RhpDGGS, id T, segmentCount in
 		return nil, fmt.Errorf("empty vertex set returned")
 	}
 
+	// helper to snap seam vertices for Facet 4 (R) from -180.0 -> +180.0
+	// (antimeridian)
+	cleanPoint := func(pt [2]float64) [2]float64 {
+		lon, lat := pt[0], pt[1]
+		if facet == 4 && math.Abs(lon - -180.0) < 1e-11 {
+			lon = 180.0
+		}
+		return [2]float64{lon, lat}
+	}
+
 	// standard non-densified polygon output (segmentCount <= 1)
 	if segmentCount <= 1 {
 		ring := make(orb.Ring, 0, numVerts+1)
 		for _, pt := range vertices {
-			ring = append(ring, orb.Point{pt[0], pt[1]})
+			cleaned := cleanPoint(pt)
+			ring = append(ring, orb.Point{cleaned[0], cleaned[1]})
 		}
 		// close ring
 		ring = append(ring, ring[0])
@@ -60,8 +76,8 @@ func CellToPolygon[T rhealpix.CellID](d *rhealpix.RhpDGGS, id T, segmentCount in
 	ring := make(orb.Ring, 0, totalPts+1)
 
 	for i := 0; i < numVerts; i++ {
-		start := vertices[i]
-		end := vertices[(i+1)%numVerts]
+		start := cleanPoint(vertices[i])
+		end := cleanPoint(vertices[(i+1)%numVerts])
 
 		lon1, lat1 := start[0], start[1]
 		lon2, lat2 := end[0], end[1]
