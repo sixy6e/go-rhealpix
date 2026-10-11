@@ -220,3 +220,15 @@ func ExportFacetSubGeometriesToGeoJSON(subGeoms []FacetSubGeometry, filePath str
 
 	return nil
 }
+
+func writeGeoJSONFile(path string, fc *geojson.FeatureCollection) error {
+	rawJSON, err := fc.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	var prettyJSON bytes.Buffer
+	if err := json.Indent(&prettyJSON, rawJSON, "", "  "); err != nil {
+		return err
+	}
+	return os.WriteFile(path, prettyJSON.Bytes(), 0644)
+}
