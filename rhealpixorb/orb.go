@@ -10,89 +10,181 @@ import (
 	rhealpix "github.com/sixy6e/go-rhealpix"
 )
 
+// CleanCellSeamVertex aligns vertex longitude signs to match the cell's
+// topological quadrant (Eastern vs Western) along the 180° antimeridian.
+func CleanCellSeamVertex(pt [2]float64, isEasternCell bool) [2]float64 {
+	lon, lat := pt[0], pt[1]
+	// lock antimeridian boundary edges cleanly to prevent GIS wrapping artifacts
+	if math.Abs(math.Abs(lon)-180.0) < 1e-10 {
+		if isEasternCell {
+			lon = 180.0
+		} else {
+			lon = -180.0
+		}
+	}
+	return [2]float64{lon, lat}
+}
+
+// IsEasternCell Determines whether a cell ring belongs to an Eastern sector (>0° longitude)
+// based on its non-seam interior vertices.
+func IsEasternCell(facet uint8, vertices [][2]float64) bool {
+	if facet == 4 {
+		return true
+	}
+	if facet == 1 {
+		return false
+	}
+
+	var sumNonSeamLon float64
+	var nonSeamCount int
+	for _, pt := range vertices {
+		if math.Abs(math.Abs(pt[0])-180.0) >= 1e-10 {
+			sumNonSeamLon += pt[0]
+			nonSeamCount++
+		}
+	}
+
+	if nonSeamCount > 0 {
+		return (sumNonSeamLon / float64(nonSeamCount)) > 0
+	}
+	return false
+}
+
+// CellBoundary returns the geographic boundary polygon ring for any cell.
+// n is the number of points per edge (n >= 2). n=2 returns standard 4 corners.
+func CellBoundary[T rhealpix.CellID](d *rhealpix.RhpDGGS, id T, n int) ([][2]float64, error) {
+	if n < 2 {
+		n = 2
+	}
+
+	shape := rhealpix.EllipsoidalCellShape(d, id)
+
+	// for standard Quads and Caps at n=2, use direct 4-corner un-projection
+	if n == 2 && (shape == rhealpix.ShapeQuad || shape == rhealpix.ShapeCap) {
+		return rhealpix.EllipsoidalVertices(d, id, false)
+	}
+
+	// retrieve standard 4 geographic corners to determine quadrant orientation (isEastern)
+	corners, err := rhealpix.EllipsoidalVertices(d, id, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed fetching ellipsoidal vertices for orientation: %w", err)
+	}
+
+	var facet uint8
+	switch v := any(id).(type) {
+	case rhealpix.CellID64:
+		facet = v.Facet()
+	case rhealpix.CellID128:
+		facet = v.Facet()
+	}
+	isEastern := IsEasternCell(facet, corners)
+
+	// get exact 4 planar corners [UL, UR, LR, LL]
+	planarVerts := rhealpix.CellPlanarVertices(d, id)
+
+	// sample planar perimeter by interpolating along the 4 edges
+	planarRing := make([][2]float64, 0, 4*(n-1))
+	for i := 0; i < 4; i++ {
+		p1 := planarVerts[i]
+		p2 := planarVerts[(i+1)%4]
+
+		for j := 0; j < n-1; j++ {
+			t := float64(j) / float64(n-1)
+			px := p1[0] + t*(p2[0]-p1[0])
+			py := p1[1] + t*(p2[1]-p1[1])
+			planarRing = append(planarRing, [2]float64{px, py})
+		}
+	}
+
+	// rotate planar ring so it starts at true Geographic NW
+	nwIdx, err := rhealpix.NWIndex(d, id)
+	if err != nil {
+		return nil, err
+	}
+
+	rotIdx := (n - 1) * nwIdx
+	rotatedPlanar := make([][2]float64, len(planarRing))
+	for k := 0; k < len(planarRing); k++ {
+		rotatedPlanar[k] = planarRing[(rotIdx+k)%len(planarRing)]
+	}
+
+	// un-project rotated planar points and snap antimeridian seam vertices
+	geoRing := make([][2]float64, len(rotatedPlanar))
+	for k, p := range rotatedPlanar {
+		lonRad, latRad, err := d.InverseProjectRadians(p[0], p[1])
+		if err != nil {
+			return nil, fmt.Errorf("point (%f, %f) for cell %v: %w", p[0], p[1], id, err)
+		}
+		if d.GetEllipsoid() != nil {
+			latRad = d.GetEllipsoid().AuthLatInverse(latRad)
+		}
+
+		pt := [2]float64{lonRad * rhealpix.RadToDeg, latRad * rhealpix.RadToDeg}
+		geoRing[k] = CleanCellSeamVertex(pt, isEastern)
+	}
+
+	// normalise antimeridian longitude jumps across the ring
+	return NormaliseRing(geoRing), nil
+}
+
+// NormaliseRing locks longitude signs so consecutive points stay within 180° span.
+func NormaliseRing(ring [][2]float64) [][2]float64 {
+	if len(ring) < 2 {
+		return ring
+	}
+
+	norm := make([][2]float64, len(ring))
+	norm[0] = ring[0]
+
+	for k := 1; k < len(ring); k++ {
+		lon := ring[k][0]
+		prevLon := norm[k-1][0]
+
+		for lon-prevLon > 180.0 {
+			lon -= 360.0
+		}
+		for lon-prevLon < -180.0 {
+			lon += 360.0
+		}
+		norm[k] = [2]float64{lon, ring[k][1]}
+	}
+
+	return norm
+}
+
 // CellToPolygon converts any rHEALPix cell (CellID64 or CellID128) into a closed orb.Polygon in geodetic coordinates.
-// If segmentCount <= 1, it returns the fundamental cell boundary (3 points for Dart, 4 points for Quad/Cap/SkewQuad).
-// If segmentCount > 1, it densifies each cell edge into segmentCount linear steps in geographic space.
+// segmentCount defines how many segments each cell edge is subdivided into (segmentCount <= 1 means 1 segment per edge, i.e., corners only).
 func CellToPolygon[T rhealpix.CellID](d *rhealpix.RhpDGGS, id T, segmentCount int) (orb.Polygon, error) {
 	var isZero bool
-	var facet uint8
-
 	switch v := any(id).(type) {
 	case rhealpix.CellID64:
 		isZero = v.IsZero()
-		facet = v.Facet()
 	case rhealpix.CellID128:
 		isZero = v.IsZero()
-		facet = v.Facet()
 	}
 
 	if isZero {
 		return nil, fmt.Errorf("zero cell ID")
 	}
 
-	// retrieve topologically aligned, GIS-valid vertices starting at true NW (Dart trimmed to 3 points)
-	var vertices [][2]float64
-	var err error
-
-	switch v := any(id).(type) {
-	case rhealpix.CellID64:
-		vertices, err = d.GeographicVertices64(v)
-	case rhealpix.CellID128:
-		vertices, err = d.GeographicVertices128(v)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute geographic vertices: %w", err)
-	}
-
-	numVerts := len(vertices)
-	if numVerts == 0 {
-		return nil, fmt.Errorf("empty vertex set returned")
-	}
-
-	// helper to snap seam vertices for Facet 4 (R) from -180.0 -> +180.0
-	// (antimeridian)
-	cleanPoint := func(pt [2]float64) [2]float64 {
-		lon, lat := pt[0], pt[1]
-		if facet == 4 && math.Abs(lon - -180.0) < 1e-11 {
-			lon = 180.0
-		}
-		return [2]float64{lon, lat}
-	}
-
-	// standard non-densified polygon output (segmentCount <= 1)
+	// n points per edge = segmentCount + 1 (e.g. segmentCount=1 => n=2 points per edge, corners only)
+	pointsPerEdge := segmentCount + 1
 	if segmentCount <= 1 {
-		ring := make(orb.Ring, 0, numVerts+1)
-		for _, pt := range vertices {
-			cleaned := cleanPoint(pt)
-			ring = append(ring, orb.Point{cleaned[0], cleaned[1]})
-		}
-		// close ring
-		ring = append(ring, ring[0])
-		return orb.Polygon{ring}, nil
+		pointsPerEdge = 2
 	}
 
-	// densified edge interpolation along authentic topological boundary edges
-	totalPts := numVerts * segmentCount
-	ring := make(orb.Ring, 0, totalPts+1)
-
-	for i := 0; i < numVerts; i++ {
-		start := cleanPoint(vertices[i])
-		end := cleanPoint(vertices[(i+1)%numVerts])
-
-		lon1, lat1 := start[0], start[1]
-		lon2, lat2 := end[0], end[1]
-
-		// interpolate intermediate points along current boundary edge
-		for j := 0; j < segmentCount; j++ {
-			t := float64(j) / float64(segmentCount)
-			interpLon := lon1 + t*(lon2-lon1)
-			interpLat := lat1 + t*(lat2-lat1)
-			ring = append(ring, orb.Point{interpLon, interpLat})
-		}
+	// generate boundary points (interpolated in planar space, then unprojected and ring-normalised)
+	boundary, err := CellBoundary(d, id, pointsPerEdge)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute cell boundary: %w", err)
 	}
 
-	// close ring for GeoJSON standard compliance
-	ring = append(ring, ring[0])
+	// convert to orb.Ring and close the polygon ring
+	ring := make(orb.Ring, len(boundary)+1)
+	for i, pt := range boundary {
+		ring[i] = orb.Point{pt[0], pt[1]}
+	}
+	ring[len(boundary)] = ring[0] // close ring
 
 	return orb.Polygon{ring}, nil
 }
