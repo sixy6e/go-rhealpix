@@ -176,53 +176,42 @@ func EllipsoidalVertices[T CellID](d *RhpDGGS, id T, trimDart bool) ([][2]float6
 	planarVerts := CellPlanarVertices(d, id) // [UL, UR, LR, LL]
 	shape := EllipsoidalCellShape(d, id)
 
+	// get index of true NW vertex in planar space directly
+	nwIdx, err := NWIndex(d, id)
+	if err != nil {
+		return nil, err
+	}
+
 	// unproject planar authalic radians back to geographic degrees
+	// starting at true NW
 	geoVerts := make([][2]float64, 4)
-	for i, pv := range planarVerts {
+	for i := 0; i < 4; i++ {
+		pv := planarVerts[(nwIdx+i)%4]
 		lonRad, latRad, err := d.InverseProjectRadians(pv[0], pv[1])
 		if err != nil {
 			return nil, err
 		}
-		geoVerts[i] = [2]float64{lonRad * RadToDeg, latRad * RadToDeg}
-	}
 
-	if shape == ShapeQuad || shape == ShapeCap {
-		return geoVerts, nil
-	}
-
-	// align start index with true NW vertex for polar cells
-	nwVert, err := NWVertex(d, id, false)
-	if err != nil {
-		return nil, err
-	}
-	nwLon := nwVert[0]
-	nwLat := nwVert[1]
-
-	nwIdx := 0
-	for i, pt := range geoVerts {
-		if math.Abs(pt[0]-nwLon) < 1e-9 && math.Abs(pt[1]-nwLat) < 1e-9 {
-			nwIdx = i
-			break
+		// apply ellipsoid authalic latitude inversion
+		if d.ellipsoid != nil {
+			latRad = d.ellipsoid.AuthLatInverse(latRad)
 		}
-	}
 
-	ordered := make([][2]float64, 4)
-	for i := 0; i < 4; i++ {
-		ordered[i] = geoVerts[(nwIdx+i)%4]
+		geoVerts[i] = [2]float64{lonRad * RadToDeg, latRad * RadToDeg}
 	}
 
 	// trim collapsed point for Dart cells (returning 3 vertices)
 	if trimDart && shape == ShapeDart {
 		trimmed := make([][2]float64, 3)
 		if FacetRegion(facet) == RegionNorthPolar {
-			trimmed[0], trimmed[1], trimmed[2] = ordered[0], ordered[1], ordered[3] // drop index 2
+			trimmed[0], trimmed[1], trimmed[2] = geoVerts[0], geoVerts[1], geoVerts[3]
 		} else {
-			trimmed[0], trimmed[1], trimmed[2] = ordered[0], ordered[2], ordered[3] // drop index 1
+			trimmed[0], trimmed[1], trimmed[2] = geoVerts[0], geoVerts[2], geoVerts[3]
 		}
 		return trimmed, nil
 	}
 
-	return ordered, nil
+	return geoVerts, nil
 }
 
 // GeographicVertices is an alias for EllipsoidalVertices, providing standard GIS-friendly terminology.
@@ -329,7 +318,7 @@ func NWVertex[T CellID](d *RhpDGGS, id T, plane bool) ([2]float64, error) {
 		// cy := b.ULY - (b.Height / 2.0)
 		cx, cy := centre[0], centre[1]
 
-		// Find vertex with smallest Chebyshev distance max(|x - cx|, |y - cy|) to pole
+		// find vertex with smallest Chebyshev distance max(|x - cx|, |y - cy|) to pole
 		minIdx := 0
 		minDist := math.MaxFloat64
 		for j := 0; j < 4; j++ {
@@ -364,4 +353,68 @@ func NWVertex[T CellID](d *RhpDGGS, id T, plane bool) ([2]float64, error) {
 	latRad := d.ellipsoid.AuthLatInverse(beta)
 
 	return [2]float64{lonRad * RadToDeg, latRad * RadToDeg}, nil
+}
+
+// NWIndex returns the slice index (0, 1, 2, or 3) within planarVerts [UL, UR, LR, LL]
+// that corresponds to the true NW vertex of the cell.
+func NWIndex[T CellID](d *RhpDGGS, id T) (int, error) {
+	shape := EllipsoidalCellShape(d, id)
+
+	switch shape {
+	case ShapeQuad, ShapeCap:
+		return 0, nil // Upper-left (UL)
+
+	case ShapeSkewQuad:
+		nuc := Nucleus(d, id)
+		triangle, region := d.Triangle(nuc[0], nuc[1], true)
+
+		if region == RegionNorthPolar {
+			ns := int(d.northSquare)
+			i := (int(triangle) - ns) % 4
+			if i < 0 {
+				i += 4
+			}
+			return (4 - i) % 4, nil // Python v[-i] -> Go v[(4 - i) % 4]
+		} else {
+			ss := int(d.southSquare)
+			i := (int(triangle) - ss) % 4
+			if i < 0 {
+				i += 4
+			}
+			return i, nil // Python v[i] -> Go v[i]
+		}
+
+	case ShapeDart:
+		planarVerts := CellPlanarVertices(d, id)
+		var facet uint8
+		switch v := any(id).(type) {
+		case CellID64:
+			facet = v.Facet()
+		case CellID128:
+			facet = v.Facet()
+		}
+
+		b := d.baseFacetBounds[facet]
+		centre := b.Centroid()
+		cx, cy := centre[0], centre[1]
+
+		minIdx := 0
+		minDist := math.MaxFloat64
+		for j := 0; j < 4; j++ {
+			dx := math.Abs(planarVerts[j][0] - cx)
+			dy := math.Abs(planarVerts[j][1] - cy)
+			dist := math.Max(dx, dy)
+			if dist < minDist {
+				minDist = dist
+				minIdx = j
+			}
+		}
+
+		if FacetRegion(facet) == RegionNorthPolar {
+			return minIdx, nil
+		}
+		return (minIdx + 1) % 4, nil
+	}
+
+	return 0, nil
 }
