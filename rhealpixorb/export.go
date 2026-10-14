@@ -99,13 +99,24 @@ func ExportRangesToGeoJSON128(d *rhealpix.RhpDGGS, ranges []Uint128Range, output
 
 // ExportCellsToGeoJSON converts a slice of CellID64 into a GeoJSON FeatureCollection file
 // with cell metadata properties for inspection in QGIS / ogrinfo.
-func ExportCellsToGeoJSON(d *rhealpix.RhpDGGS, cells []rhealpix.CellID64, outputPath string) error {
+// If segmentCount <= 0, AdaptiveSegmentCount is used to automatically determine
+// edge density based on cell shape and resolution.
+func ExportCellsToGeoJSON(d *rhealpix.RhpDGGS, cells []rhealpix.CellID64, outputPath string, segmentCount int) error {
 	fc := geojson.NewFeatureCollection()
 
 	for _, cell := range cells {
-		poly, err := Cell64ToPolygon(d, cell, 2)
+		shape := rhealpix.EllipsoidalCellShape(d, cell)
+		res := cell.Resolution()
+
+		// determine effective segment count for this specific cell
+		effectiveSegments := segmentCount
+		if effectiveSegments <= 0 {
+			effectiveSegments = AdaptiveSegmentCount(shape, res)
+		}
+
+		poly, err := Cell64ToPolygon(d, cell, effectiveSegments)
 		if err != nil {
-			return fmt.Errorf("failed converting cell %d to polygon: %w", cell, err)
+			return fmt.Errorf("failed converting cell %s to polygon: %w", cell.String(), err)
 		}
 
 		feature := geojson.NewFeature(poly)
@@ -116,8 +127,10 @@ func ExportCellsToGeoJSON(d *rhealpix.RhpDGGS, cells []rhealpix.CellID64, output
 		feature.Properties["cell_id_str"] = cell.String()
 		feature.Properties["cell_id_uint64"] = fmt.Sprintf("%d", uint64(cell))
 		feature.Properties["cell_id_hex"] = fmt.Sprintf("0x%X", uint64(cell))
-		feature.Properties["resolution"] = cell.Resolution()
+		feature.Properties["resolution"] = res
 		feature.Properties["facet"] = cell.Facet()
+		feature.Properties["shape"] = shape.String()
+		feature.Properties["segment_count"] = effectiveSegments
 		feature.Properties["range_min"] = fmt.Sprintf("%d", uint64(minRange))
 		feature.Properties["range_max"] = fmt.Sprintf("%d", uint64(maxRange))
 
@@ -138,7 +151,6 @@ func ExportCellsToGeoJSON(d *rhealpix.RhpDGGS, cells []rhealpix.CellID64, output
 		return fmt.Errorf("failed writing file %s: %w", outputPath, err)
 	}
 
-	// fmt.Printf("Exported %d compacted cells to %s\n", len(cells), outputPath)
 	return nil
 }
 
@@ -149,6 +161,7 @@ func ExportCellsToGeoJSON128(d *rhealpix.RhpDGGS, cells []rhealpix.CellID128, ou
 
 	for _, cell := range cells {
 		poly, err := Cell128ToPolygon(d, cell, 2)
+		shape := rhealpix.EllipsoidalCellShape(d, cell)
 		if err != nil {
 			return fmt.Errorf("failed converting cell %s to polygon: %w", cell.String(), err)
 		}
@@ -163,6 +176,7 @@ func ExportCellsToGeoJSON128(d *rhealpix.RhpDGGS, cells []rhealpix.CellID128, ou
 		feature.Properties["cell_id_hex"] = fmt.Sprintf("0x%016X%016X", cell.High, cell.Low)
 		feature.Properties["resolution"] = cell.Resolution()
 		feature.Properties["facet"] = cell.Facet()
+		feature.Properties["shape"] = shape.String()
 		feature.Properties["range_min_str"] = minRange.String()
 		feature.Properties["range_max_str"] = maxRange.String()
 
@@ -231,4 +245,40 @@ func writeGeoJSONFile(path string, fc *geojson.FeatureCollection) error {
 		return err
 	}
 	return os.WriteFile(path, prettyJSON.Bytes(), 0644)
+}
+
+// AdaptiveSegmentCount determines the optimal edge subdivision count
+// based on cell shape and resolution depth to eliminate T-junction gaps.
+func AdaptiveSegmentCount(shape rhealpix.CellShape, res uint8) int {
+	// Polar Cap and Dart cells span large angular curves at low resolutions
+	if shape == rhealpix.ShapeDart || shape == rhealpix.ShapeCap {
+		switch {
+		case res <= 3:
+			return 16
+		case res <= 5:
+			return 12
+		case res <= 7:
+			return 8
+		default:
+			return 4
+		}
+	}
+
+	// Polar Skew Quads
+	if shape == rhealpix.ShapeSkewQuad {
+		switch {
+		case res <= 4:
+			return 12
+		case res <= 6:
+			return 8
+		default:
+			return 4
+		}
+	}
+
+	// Equatorial Quads (Facets 1-4) have straight meridian/parallel edges
+	if res <= 2 {
+		return 8
+	}
+	return 4
 }
