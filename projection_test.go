@@ -7,6 +7,12 @@ import (
 
 func TestComputeCellPath_GroundTruth(t *testing.T) {
 	el := NewWGS84()
+	d := NewRhpDGGS(
+		WithEllipsoid(el),
+		WithNSide(3),
+		WithNorthSquare(0),
+		WithSouthSquare(0),
+	)
 
 	// map numerical facet index (0..5) back to canonical character (N, O, P, Q, R, S)
 	facetChars := [6]byte{'N', 'O', 'P', 'Q', 'R', 'S'}
@@ -91,7 +97,7 @@ func TestComputeCellPath_GroundTruth(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			facetIdx, path, err := computeCellPath(el, tt.lon, tt.lat, tt.res, 15)
+			facetIdx, path, err := d.computeCellPath(tt.lon, tt.lat, tt.res, 15)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -111,6 +117,12 @@ func TestComputeCellPath_GroundTruth(t *testing.T) {
 
 func TestForwardProject_GroundTruth(t *testing.T) {
 	el := NewWGS84()
+	d := NewRhpDGGS(
+		WithEllipsoid(el),
+		WithNSide(3),
+		WithNorthSquare(0),
+		WithSouthSquare(0),
+	)
 
 	// benchmarks sourced directly from rhealpixdggs-py / pyproj (WGS84)
 	tests := []struct {
@@ -188,7 +200,7 @@ func TestForwardProject_GroundTruth(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotX, gotY := el.ForwardProject(tt.lon, tt.lat)
+			gotX, gotY, _ := d.ForwardProject(tt.lon, tt.lat)
 
 			diffX := math.Abs(gotX - tt.wantX)
 			diffY := math.Abs(gotY - tt.wantY)
@@ -203,6 +215,12 @@ func TestForwardProject_GroundTruth(t *testing.T) {
 
 func TestProjectionRoundTrip(t *testing.T) {
 	el := NewWGS84()
+	d := NewRhpDGGS(
+		WithEllipsoid(el),
+		WithNSide(3),
+		WithNorthSquare(0),
+		WithSouthSquare(0),
+	)
 
 	tests := []struct {
 		name     string
@@ -228,8 +246,8 @@ func TestProjectionRoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			xMeters, yMeters := el.ForwardProject(tt.lon, tt.lat)
-			gotLon, gotLat := el.InverseProject(xMeters, yMeters)
+			xMeters, yMeters, _ := d.ForwardProject(tt.lon, tt.lat)
+			gotLon, gotLat, _ := d.InverseProject(xMeters, yMeters)
 
 			diffLon := math.Abs(gotLon - tt.lon)
 			diffLat := math.Abs(gotLat - tt.lat)
