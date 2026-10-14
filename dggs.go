@@ -306,17 +306,18 @@ func (d *RhpDGGS) GeographicFacetDomain(facet uint8) (GeographicFacetDomain, err
 }
 
 // GeographicFacetClippingDomains returns all domain boxes used for Sutherland-Hodgman clipping,
-// extending the 6 canonical facet domains with the two antimeridian wrap-around boxes.
+// breaking polar caps into explicit 90° quadrant sectors and extending antimeridian wrap-around boxes.
 func (d *RhpDGGS) GeographicFacetClippingDomains() []GeographicFacetDomain {
 	phi0Deg := d.ellipsoid.Phi0 * RadToDeg
 
-	// allocate slice with capacity for all 8 clipping boxes
-	clippingDomains := make([]GeographicFacetDomain, 0, 8)
+	// allocate capacity for 16 clipping boxes (4 equatorial + 2 wrap, 4 north + 1 wrap, 4 south + 1 wrap)
+	clippingDomains := make([]GeographicFacetDomain, 0, 16)
 
-	// append the 6 canonical pre-calculated domains [0..5]
-	clippingDomains = append(clippingDomains, d.geoFacetDomains[:]...)
+	// --- EQUATORIAL BELT DOMAINS (FACETS 1..4) ---
+	// append canonical equatorial domains (facets 1, 2, 3, 4)
+	clippingDomains = append(clippingDomains, d.geoFacetDomains[1:5]...)
 
-	// append the 2 extended antimeridian wrap domains
+	// append equatorial antimeridian wrap domains
 	clippingDomains = append(clippingDomains,
 		// Antimeridian East Wrap: [180, 270] -> Belongs to Facet 1 (O)
 		GeographicFacetDomain{
@@ -336,6 +337,34 @@ func (d *RhpDGGS) GeographicFacetClippingDomains() []GeographicFacetDomain {
 			MaxLat:  phi0Deg,
 			Region:  RegionEquatorial,
 		},
+	)
+
+	// --- FACET 0 (NORTH POLAR CAP QUADRANT SECTORS) ---
+	clippingDomains = append(clippingDomains,
+		// Sector O (West): [-180, -90]
+		GeographicFacetDomain{FacetID: 0, MinLon: -180.0, MaxLon: -90.0, MinLat: phi0Deg, MaxLat: 90.0, Region: RegionNorthPolar},
+		// Sector P (Mid-West): [-90, 0]
+		GeographicFacetDomain{FacetID: 0, MinLon: -90.0, MaxLon: 0.0, MinLat: phi0Deg, MaxLat: 90.0, Region: RegionNorthPolar},
+		// Sector Q (Mid-East): [0, 90]
+		GeographicFacetDomain{FacetID: 0, MinLon: 0.0, MaxLon: 90.0, MinLat: phi0Deg, MaxLat: 90.0, Region: RegionNorthPolar},
+		// Sector R (East): [90, 180]
+		GeographicFacetDomain{FacetID: 0, MinLon: 90.0, MaxLon: 180.0, MinLat: phi0Deg, MaxLat: 90.0, Region: RegionNorthPolar},
+		// Sector O Antimeridian East Wrap: [180, 270]
+		GeographicFacetDomain{FacetID: 0, MinLon: 180.0, MaxLon: 270.0, MinLat: phi0Deg, MaxLat: 90.0, Region: RegionNorthPolar},
+	)
+
+	// --- FACET 5 (SOUTH POLAR CAP QUADRANT SECTORS) ---
+	clippingDomains = append(clippingDomains,
+		// Sector O (West): [-180, -90]
+		GeographicFacetDomain{FacetID: 5, MinLon: -180.0, MaxLon: -90.0, MinLat: -90.0, MaxLat: -phi0Deg, Region: RegionSouthPolar},
+		// Sector P (Mid-West): [-90, 0]
+		GeographicFacetDomain{FacetID: 5, MinLon: -90.0, MaxLon: 0.0, MinLat: -90.0, MaxLat: -phi0Deg, Region: RegionSouthPolar},
+		// Sector Q (Mid-East): [0, 90]
+		GeographicFacetDomain{FacetID: 5, MinLon: 0.0, MaxLon: 90.0, MinLat: -90.0, MaxLat: -phi0Deg, Region: RegionSouthPolar},
+		// Sector R (East): [90, 180]
+		GeographicFacetDomain{FacetID: 5, MinLon: 90.0, MaxLon: 180.0, MinLat: -90.0, MaxLat: -phi0Deg, Region: RegionSouthPolar},
+		// Sector O Antimeridian East Wrap: [180, 270]
+		GeographicFacetDomain{FacetID: 5, MinLon: 180.0, MaxLon: 270.0, MinLat: -90.0, MaxLat: -phi0Deg, Region: RegionSouthPolar},
 	)
 
 	return clippingDomains
