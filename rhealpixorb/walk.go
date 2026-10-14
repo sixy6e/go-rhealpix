@@ -435,7 +435,7 @@ func ForwardProjectPolygon(d *rhealpix.RhpDGGS, poly orb.Polygon) orb.Polygon {
 }
 
 // ForwardProjectPolygonForcedRegion projects geographic polygon points through RhpDGGS
-// using forced regional context, maintaining seam alignment.
+// using forced regional context, maintaining seam alignment across all regions.
 func ForwardProjectPolygonForcedRegion(d *rhealpix.RhpDGGS, poly orb.Polygon, dom rhealpix.GeographicFacetDomain) orb.Polygon {
 	if len(poly) == 0 {
 		return nil
@@ -448,20 +448,36 @@ func ForwardProjectPolygonForcedRegion(d *rhealpix.RhpDGGS, poly orb.Polygon, do
 		for _, pt := range ring {
 			lonDeg := pt.X()
 			latRad := pt.Y() * rhealpix.DegToRad
+			isOnSeam := math.Abs(math.Abs(lonDeg)-180.0) < 1e-11
 
-			// preserve +180° as +pi for Facet 4 (or any domain whose MaxLon == 180.0)
 			var lonRad float64
-			if dom.MaxLon == 180.0 && math.Abs(lonDeg-180.0) < 1e-11 {
-				lonRad = math.Pi // keep strictly +pi!
+			if isOnSeam {
+				// lock input longitude sign based on domain context
+				if dom.FacetID == 4 || dom.MaxLon == 180.0 {
+					lonRad = math.Pi // Eastern sector (Sector R) -> +180°
+				} else if dom.FacetID == 1 || dom.MinLon == 180.0 || dom.MinLon == -270.0 {
+					lonRad = -math.Pi // Western / Extended Wrap sector (Sector O) -> -180°
+				} else {
+					if lonDeg >= 0 {
+						lonRad = math.Pi
+					} else {
+						lonRad = -math.Pi
+					}
+				}
 			} else {
 				lonRad = lonDeg * rhealpix.DegToRad
 			}
 
+			// forward project forcing the region a point is to be placed within
 			xRhp, yRhp, _ := d.ForwardProjectForcedRegion(lonRad, latRad, dom.Region)
 
-			// HARD LOCK: If this point is on the +180° seam for Facet 4, force X_RHP = +pi
-			if dom.MaxLon == 180.0 && math.Abs(lonDeg-180.0) < 1e-11 {
-				xRhp = math.Pi
+			// HARD LOCK: enforce planar X_RHP alignment ONLY on Equatorial Facets (1 and 4)
+			if isOnSeam {
+				if dom.FacetID == 4 {
+					xRhp = math.Pi
+				} else if dom.FacetID == 1 {
+					xRhp = -math.Pi
+				}
 			}
 
 			projectedRing = append(projectedRing, orb.Point{xRhp, yRhp})
@@ -477,13 +493,11 @@ func PartitionPolygonToCells(d *rhealpix.RhpDGGS, inputGeom orb.Geometry, target
 	if err != nil {
 		return nil, err
 	}
-	// fmt.Println("len(facetSubGeoms):", len(facetSubGeoms))
 
 	rawCells := make([]rhealpix.CellID64, 0, 128)
 	rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
 
 	for _, sub := range facetSubGeoms {
-		// fmt.Println("sub.FacetID:", sub.FacetID)
 
 		rootCell, err := rhealpix.PackCellID64(sub.FacetID, 0, nil)
 		if err != nil {
@@ -506,13 +520,11 @@ func PartitionPolygonToCells128(d *rhealpix.RhpDGGS, inputGeom orb.Geometry, tar
 	if err != nil {
 		return nil, err
 	}
-	// fmt.Println("len(facetSubGeoms):", len(facetSubGeoms))
 
 	rawCells := make([]rhealpix.CellID128, 0, 128)
 	rootBox := PlanarBox{MinX: 0.0, MaxX: 1.0, MinY: 0.0, MaxY: 1.0}
 
 	for _, sub := range facetSubGeoms {
-		// fmt.Println("sub.FacetID:", sub.FacetID)
 
 		rootCell, err := rhealpix.PackCellID128(sub.FacetID, 0, nil)
 		if err != nil {
