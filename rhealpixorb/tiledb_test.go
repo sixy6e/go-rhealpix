@@ -15,6 +15,13 @@ import (
 func TestBoundingBoxToTileDBRanges64_Integration(t *testing.T) {
 	el := rhealpix.NewWGS84()
 	targetRes := uint8(12)
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+		rhealpix.WithMaxResolution(uint8(targetRes)),
+	)
 
 	// Canberra / ACT Bounding Box [minLon, minLat, maxLon, maxLat]
 	canberraBBox := orb.Bound{
@@ -22,7 +29,7 @@ func TestBoundingBoxToTileDBRanges64_Integration(t *testing.T) {
 		Max: orb.Point{149.4, -35.1},
 	}
 
-	ranges, err := rhealpixorb.BoundingBoxToTileDBRanges(el, canberraBBox, targetRes)
+	ranges, err := rhealpixorb.BoundingBoxToTileDBRanges(d, canberraBBox, targetRes)
 	if err != nil {
 		t.Fatalf("BoundingBoxToTileDBRanges failed: %v", err)
 	}
@@ -79,6 +86,13 @@ func TestBoundingBoxToTileDBRanges64_Integration(t *testing.T) {
 func TestBoundingBoxToTileDBRanges128_Integration(t *testing.T) {
 	el := rhealpix.NewWGS84()
 	targetRes := uint8(20)
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+		rhealpix.WithMaxResolution(uint8(targetRes)),
+	)
 
 	// Canberra / ACT Bounding Box [minLon, minLat, maxLon, maxLat]
 	canberraBBox := orb.Bound{
@@ -86,7 +100,7 @@ func TestBoundingBoxToTileDBRanges128_Integration(t *testing.T) {
 		Max: orb.Point{149.4, -35.1},
 	}
 
-	ranges, err := rhealpixorb.BoundingBoxToTileDBRanges128(el, canberraBBox, targetRes)
+	ranges, err := rhealpixorb.BoundingBoxToTileDBRanges128(d, canberraBBox, targetRes)
 	if err != nil {
 		t.Fatalf("BoundingBoxToTileDBRanges128 failed: %v", err)
 	}
