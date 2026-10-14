@@ -10,6 +10,12 @@ import (
 
 func TestDeriveRegionCodeSingleRoot(t *testing.T) {
 	el := rhealpix.NewWGS84()
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+	)
 
 	// Canberra area bounding box (wholly inside Equatorial Facet Q / Index 3)
 	bound := orb.Bound{
@@ -17,7 +23,7 @@ func TestDeriveRegionCodeSingleRoot(t *testing.T) {
 		Max: orb.Point{149.5, -35.0},
 	}
 
-	regionCode, suids, err := rhealpixorb.DeriveRegionCode64FromGeometry(el, bound, 10)
+	regionCode, suids, err := rhealpixorb.DeriveRegionCode64FromGeometry(d, bound, 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -33,6 +39,12 @@ func TestDeriveRegionCodeSingleRoot(t *testing.T) {
 
 func TestDeriveRegionCodeDeterministicSort(t *testing.T) {
 	el := rhealpix.NewWGS84()
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+	)
 
 	// bounding box crossing equatorial boundary (between Facet P and Facet Q across 0 deg Meridian)
 	bound := orb.Bound{
@@ -40,7 +52,7 @@ func TestDeriveRegionCodeDeterministicSort(t *testing.T) {
 		Max: orb.Point{1.0, -5.0},
 	}
 
-	regionCode, suids, err := rhealpixorb.DeriveRegionCode64FromGeometry(el, bound, 8)
+	regionCode, suids, err := rhealpixorb.DeriveRegionCode64FromGeometry(d, bound, 8)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -52,6 +64,12 @@ func TestDeriveRegionCodeDeterministicSort(t *testing.T) {
 
 func TestCell64ToPolygon(t *testing.T) {
 	el := rhealpix.NewWGS84()
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+	)
 
 	cell, err := rhealpix.ParseCellID64("Q012")
 	if err != nil {
@@ -59,7 +77,7 @@ func TestCell64ToPolygon(t *testing.T) {
 	}
 
 	// standard 4-corner polygon (segmentCount = 1)
-	poly, err := rhealpixorb.Cell64ToPolygon(el, cell, 1)
+	poly, err := rhealpixorb.Cell64ToPolygon(d, cell, 1)
 	if err != nil {
 		t.Fatalf("unexpected polygon conversion error: %v", err)
 	}
@@ -70,7 +88,7 @@ func TestCell64ToPolygon(t *testing.T) {
 	}
 
 	// densified polygon (segmentCount = 4) -> 4 corners * 4 segments + 1 closure point = 17 points
-	polyDensified, err := rhealpixorb.Cell64ToPolygon(el, cell, 4)
+	polyDensified, err := rhealpixorb.Cell64ToPolygon(d, cell, 4)
 	if err != nil {
 		t.Fatalf("unexpected densified polygon conversion error: %v", err)
 	}
@@ -83,6 +101,12 @@ func TestCell64ToPolygon(t *testing.T) {
 
 func TestPolarCellToPolygon(t *testing.T) {
 	el := rhealpix.NewWGS84()
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+	)
 
 	// parse a cell on North Polar Facet N (Facet 0)
 	cell, err := rhealpix.ParseCellID64("N0")
@@ -90,7 +114,7 @@ func TestPolarCellToPolygon(t *testing.T) {
 		t.Fatalf("unexpected parse error for polar cell: %v", err)
 	}
 
-	poly, err := rhealpixorb.Cell64ToPolygon(el, cell, 1)
+	poly, err := rhealpixorb.Cell64ToPolygon(d, cell, 1)
 	if err != nil {
 		t.Fatalf("unexpected polar polygon conversion error: %v", err)
 	}
@@ -103,6 +127,12 @@ func TestPolarCellToPolygon(t *testing.T) {
 func TestPointToCellGroundTruth(t *testing.T) {
 	// CellID's (SUID's) were calculated with rhealpixdggs_py using cell_from_point output
 	el := rhealpix.NewWGS84()
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+	)
 
 	tests := []struct {
 		name       string
@@ -177,7 +207,7 @@ func TestPointToCellGroundTruth(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cell, err := rhealpix.ForwardTransform64(el, tt.lon, tt.lat, tt.targetRes)
+			cell, err := d.ForwardTransform64(tt.lon, tt.lat, tt.targetRes)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -190,6 +220,12 @@ func TestPointToCellGroundTruth(t *testing.T) {
 
 func TestSatelliteGranuleIndexingEdgeCases(t *testing.T) {
 	el := rhealpix.NewWGS84()
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+	)
 
 	t.Run("Granule Spanning Equatorial Meridian (P/Q boundary)", func(t *testing.T) {
 		// a mock Sentinel-2 granule crossing 0 degrees longitude
@@ -200,7 +236,7 @@ func TestSatelliteGranuleIndexingEdgeCases(t *testing.T) {
 
 		expectedRegionCode := "P5228-Q3006"
 
-		regionCode, suids, err := rhealpixorb.DeriveRegionCode64FromGeometry(el, granuleBound, 8)
+		regionCode, suids, err := rhealpixorb.DeriveRegionCode64FromGeometry(d, granuleBound, 8)
 		if err != nil {
 			t.Fatalf("failed to derive region code: %v", err)
 		}
@@ -226,7 +262,7 @@ func TestSatelliteGranuleIndexingEdgeCases(t *testing.T) {
 
 		expectedRegionCode := "N44"
 
-		regionCode, suids, err := rhealpixorb.DeriveRegionCode64FromGeometry(el, polarPass, 6)
+		regionCode, suids, err := rhealpixorb.DeriveRegionCode64FromGeometry(d, polarPass, 6)
 		if err != nil {
 			t.Fatalf("failed to derive polar region code: %v", err)
 		}
