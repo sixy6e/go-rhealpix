@@ -19,8 +19,15 @@ func TestSTACGeometryToTileDBRangesTopDown_Canberra(t *testing.T) {
 
 	// decompose down to Level 7 (~10km resolution)
 	targetRes := uint8(7)
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+		rhealpix.WithMaxResolution(uint8(targetRes)),
+	)
 
-	compactedCells, err := rhealpixorb.STACGeometryToTileDBRangesTopDown(el, canberraBBox, targetRes)
+	compactedCells, err := rhealpixorb.STACGeometryToTileDBRangesTopDown(d, canberraBBox, targetRes)
 	if err != nil {
 		t.Fatalf("Top-down decomposition failed: %v", err)
 	}
@@ -46,10 +53,17 @@ func BenchmarkSTACGeometryToTileDBRangesTopDown_Canberra(b *testing.B) {
 		Max: orb.Point{149.4, -35.1},
 	}.ToPolygon()
 	targetRes := uint8(7)
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+		rhealpix.WithMaxResolution(uint8(targetRes)),
+	)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := rhealpixorb.STACGeometryToTileDBRangesTopDown(el, canberraBBox, targetRes)
+		_, err := rhealpixorb.STACGeometryToTileDBRangesTopDown(d, canberraBBox, targetRes)
 		if err != nil {
 			b.Fatalf("Decomposition failed: %v", err)
 		}
