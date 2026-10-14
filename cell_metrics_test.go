@@ -9,13 +9,19 @@ import (
 
 func TestCellAreaInvariants(t *testing.T) {
 	el := rhealpix.NewWGS84()
-	budget := el.AreaErrorBudget(15)
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+	)
+	budget := d.AreaErrorBudget(15)
 
 	// total Earth Authalic Surface Area = 4 * pi * R_A^2
 	totalEarthArea := 4.0 * math.Pi * el.RA * el.RA
 
 	// at Res 0, there are 6 base facets. Each Res 0 cell should be 1/6th of total Earth area.
-	res0Area := el.CellArea(0, false)
+	res0Area := d.CellArea(0, false)
 	expectedRes0Area := totalEarthArea / 6.0
 
 	// use tolerance from the AreaErrorBudget for Res 0
@@ -26,7 +32,7 @@ func TestCellAreaInvariants(t *testing.T) {
 	}
 
 	// at Res 1, each Res 0 cell splits into 9 sub-cells.
-	res1Area := el.CellArea(1, false)
+	res1Area := d.CellArea(1, false)
 	expectedRes1Area := res0Area / 9.0
 
 	tol1 := budget[1].AbsTolerance
