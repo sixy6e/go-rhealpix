@@ -140,7 +140,7 @@ func EllipsoidalCellShape[T CellID](d *RhpDGGS, id T) CellShape {
 
 	// Dart Check 1 (Main Diagonal: i * (N + 1))
 	isDart1 := true
-	for i := uint8(0); i < res; i++ {
+	for i := uint8(1); i < res; i++ {
 		digit := extractSubCellDigit(id, i)
 		if !isOnMainDiagonal(digit, nside) {
 			isDart1 = false
@@ -153,7 +153,7 @@ func EllipsoidalCellShape[T CellID](d *RhpDGGS, id T) CellShape {
 
 	// Dart Check 2 (Anti-Diagonal: (i + 1) * (N - 1))
 	isDart2 := true
-	for i := uint8(0); i < res; i++ {
+	for i := uint8(1); i < res; i++ {
 		digit := extractSubCellDigit(id, i)
 		if !isOnAntiDiagonal(digit, nside) {
 			isDart2 = false
@@ -208,14 +208,16 @@ func isOnMainDiagonal(digit uint8, nside uint16) bool {
 	return (d%step) == 0 && (d/step) < nside
 }
 
-// isOnAntiDiagonal checks if a sub-cell digit falls into S2 = {(i + 1) * (N - 1) for i in 0..N-1}.
+// isOnAntiDiagonal checks if digit belongs to S2 = { (i + 1) * (N - 1) for i in 0..N-1 }
 func isOnAntiDiagonal(digit uint8, nside uint16) bool {
 	d := uint16(digit)
 	step := nside - 1
-	if step == 0 || d == 0 {
+	if step == 0 {
 		return d == 0
 	}
-	return (d%step) == 0 && (d/step) <= nside && (d/step) > 0
+	// for d = 0, d % step is 0, but d / step is 0 which fails (d / step >= 1)
+	div := d / step
+	return (d%step) == 0 && div >= 1 && div <= nside
 }
 
 // --- Generic Utility Functions ---
