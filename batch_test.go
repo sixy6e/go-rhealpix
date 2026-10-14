@@ -10,7 +10,15 @@ import (
 // --- Benchmarks ---
 
 func BenchmarkForwardBatchParallel64_1M(b *testing.B) {
+	targetRes := 12
 	el := rhealpix.NewWGS84()
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+		rhealpix.WithMaxResolution(uint8(targetRes)),
+	)
 	numPoints := 1_000_000
 
 	lons := make([]float64, numPoints)
@@ -25,12 +33,20 @@ func BenchmarkForwardBatchParallel64_1M(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = rhealpix.ForwardBatchParallel64(el, lons, lats, 12, out)
+		_ = rhealpix.ForwardBatchParallel64(d, lons, lats, uint8(targetRes), out)
 	}
 }
 
 func BenchmarkForwardBatchParallel128_1M(b *testing.B) {
+	targetRes := 24
 	el := rhealpix.NewWGS84()
+	d := rhealpix.NewRhpDGGS(
+		rhealpix.WithEllipsoid(el),
+		rhealpix.WithNSide(3),
+		rhealpix.WithNorthSquare(0),
+		rhealpix.WithSouthSquare(0),
+		rhealpix.WithMaxResolution(uint8(targetRes)),
+	)
 	numPoints := 1_000_000
 
 	lons := make([]float64, numPoints)
@@ -45,6 +61,6 @@ func BenchmarkForwardBatchParallel128_1M(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = rhealpix.ForwardBatchParallel128(el, lons, lats, 24, out)
+		_ = rhealpix.ForwardBatchParallel128(d, lons, lats, uint8(targetRes), out)
 	}
 }
