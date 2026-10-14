@@ -424,8 +424,7 @@ func STACGeometryToCompactedCells(
 	}
 
 	// run top-down planar decomposition and compaction
-	// compactedCells, err := STACGeometryToTileDBRangesTopDown(d, g, targetRes)
-	compactedCells, err := STACGeometryToTileDBRangesTopDown2(d, g, targetRes)
+	compactedCells, err := STACGeometryToTileDBRangesTopDown(d, g, targetRes)
 	if err != nil {
 		return nil, fmt.Errorf("failed top down geometry decomposition: %w", err)
 	}
