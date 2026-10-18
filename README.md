@@ -2,7 +2,7 @@
 
 A high-performance Go implementation of the **rHEALPix Discrete Global Grid System (DGGS)**.
 
-`go-rhealpix` provides memory-efficient spatial indexing, hierarchical cell bit-packing, bounding box/polygon range generation, and lossless spatial compaction for global geospatial datasets (e.g., satellite imagery telemetry, point clouds, and TileDB spatial dimensions).
+`go-rhealpix` provides memory-efficient spatial indexing, hierarchical cell bit-packing, bounding box/polygon range generation, and lossless spatial compaction for global geospatial datasets (e.g., satellite imagery telemetry, point clouds).
 
 ---
 
@@ -17,26 +17,18 @@ This library is an idiomatic, high-performance Go port and extension inspired by
 * 🔬 **IOP Publishing Paper:** [The rHEALPix Discrete Global Grid System (IOP Conf. Series: Earth and Environmental Science)](https://iopscience.iop.org/article/10.1088/1755-1315/34/1/012012/pdf)
 * 📊 **Official Landcare Research Paper:** [rHEALPix Discrete Global Grid System Data Store](https://datastore.landcareresearch.co.nz/dataset/rhealpix-discrete-global-grid-system)
 
-### Scope & Initial Implementation Constraints
-
-To optimize for maximum computational performance, simple bit manipulation, and database index friendliness, **this implementation currently focuses on the standard baseline rHEALPix DGGS configuration**:
-
-* **Aperture:** $3 \times 3$ (Aperture 9 nonary subdivision).
-* **Polar Cap Alignment:** `north_square = 0` and `south_square = 0`.
-  * The North ($N$) and South ($S$) polar caps attach directly to **Facet O** (Equatorial Facet 0).
-* **Ellipsoid:** WGS84 (EPSG:4326 authalic coordinates).
-
 ---
 
 ## Key Features
 
 * **Compact Integer Encoding:**
   * **`CellID64`:** Ultra-fast 64-bit unsigned integer encoding supporting **Resolutions 0 through 14**.
-  * **`CellID128`:** 128-bit unsigned integer (`High`/`Low` pair) supporting **Resolutions 0 through 30** for millimeter-level sub-meter precision.
+  * **`CellID128`:** 128-bit unsigned integer (`High`/`Low` pair) supporting **Resolutions 0 through 30** for millimetre-level sub-metre precision.
 * **Lossless Spatial Compaction:**
   * Generic `Compact[T]` function that recursively collapses complete $3 \times 3$ (9-child) cell blocks into their parent cell bottom-up across resolutions.
+  * `STACGeometryToCompactedCells` decomposes a GeoJSON geometry into a solid hierarchically compacted set of rHEALPix cell IDs 
 * **Database & Cloud Querying (TileDB / S3):**
-  * `BoundingBoxToTileDBRanges` & `KRingToTileDBRanges` for $O(\log N)$ 1D range queries over $1\text{D}$ space-filling curves.
+  * `BoundingBoxToTileDBRanges`, `STACGeometryToTileDBRanges` & `KRingToTileDBRanges` for $O(\log N)$ 1D range queries over $1\text{D}$ space-filling curves.
 * **Vector Integration:**
   * Native conversion to/from [`orb`](https://github.com/paulmach/orb) geometries with boundary densification along facet edges.
 
@@ -55,15 +47,17 @@ Below are the exact grid metrics derived from the reference WGS84 ellipsoid ($10
 | **12** | $\sim 18.83\text{ m}$ | $\sim 354.6\text{ m}^2$ | `CellID64` | Suburban building footprints |
 | **13** | $\sim 6.28\text{ m}$ | $\sim 39.4\text{ m}^2$ | `CellID64` | Fine urban detail |
 | **14** | $\mathbf{\sim 2.09\text{ m}}$ | $\mathbf{\sim 4.38\text{ m}^2}$ | **`CellID64` (Max)** | **Parking space / High-res aerial** |
-| **15** | $\sim 69.7\text{ cm}$ | $\sim 0.486\text{ m}^2$ | `CellID128` | Sub-meter drone scans |
+| **15** | $\sim 69.7\text{ cm}$ | $\sim 0.486\text{ m}^2$ | `CellID128` | Sub-metre drone scans |
 | **20** | $\sim 2.87\text{ cm}$ | $\sim 8.24\text{ cm}^2$ | `CellID128` | Precision agriculture / Surveying |
 | **30** | $\sim 0.028\text{ mm}$ | $\sim 0.0008\text{ mm}^2$ | `CellID128` | High-density LiDAR point clouds |
 
-> **Note on 64-bit Limit:** `CellID64` packs the 3-bit Facet ID, 4-bit Resolution depth, and 14 sub-cell path digits into 63 bits, capping out at **Resolution 14 ($\approx 2.09\text{ meters}$ width)**. Higher resolutions automatically use `CellID128`.
+> **Note on 64-bit Limit:** `CellID64` packs the 3-bit Facet ID, 4-bit Resolution depth, and 14 sub-cell path digits into 63 bits, capping out at **Resolution 14 ($\approx 2.09\text{ metres}$ width)**. Higher resolutions automatically use `CellID128`.
 
 ---
 
 ## Topology
+
+Standard configuration with the N and S facets at positions 0 (above and below facet O).
 
 ```text
    +---+
@@ -73,4 +67,16 @@ Below are the exact grid metrics derived from the reference WGS84 ellipsoid ($10
    +---+---+---+---+
    | S |           <- South Polar Cap (S) attached below Facet O
    +---+
+```
+
+Alternate configuration: NorthSquare=1, SouthSquare=2.
+
+```text
+       +---+
+       | N |           <- North Polar Cap (N) attached above Facet P
+   +---+---+---+---+
+   | O | P | Q | R |   <- Equatorial Belt (Facets O, P, Q, R)
+   +---+---+---+---+
+           | S |           <- South Polar Cap (S) attached below Facet Q
+           +---+
 ```
