@@ -74,36 +74,8 @@ func BoundingBoxToTileDBRanges(d *rhealpix.RhpDGGS, bound orb.Bound, targetRes u
 		return MergeRangesWithGap(append(r1, r2...), DefaultQueryMaxGap), nil
 	}
 
-	// construct closed polygon representation of bounding box
-	poly := orb.Polygon{
-		orb.Ring{
-			bound.Min,
-			{bound.Max.X(), bound.Min.Y()},
-			bound.Max,
-			{bound.Min.X(), bound.Max.Y()},
-			bound.Min,
-		},
-	}
-
-	compacted, err := STACGeometryToTileDBRangesTopDown(d, poly, targetRes)
-	if err != nil {
-		return nil, fmt.Errorf("failed bounding box decomposition: %w", err)
-	}
-
-	if len(compacted) == 0 {
-		return nil, nil
-	}
-
-	ranges := make([]Uint64Range, 0, len(compacted))
-	for _, c := range compacted {
-		minCell, maxCell := c.SubtreeRange(targetRes)
-		ranges = append(ranges, Uint64Range{
-			Min: uint64(minCell),
-			Max: uint64(maxCell),
-		})
-	}
-
-	return MergeRangesWithGap(ranges, DefaultQueryMaxGap), nil
+	poly := bound.ToPolygon()
+	return STACGeometryToTileDBRanges(d, *geojson.NewGeometry(poly), targetRes)
 }
 
 // BoundingBoxToTileDBRanges128 translates a WGS84 geographic bounding box
@@ -132,32 +104,8 @@ func BoundingBoxToTileDBRanges128(d *rhealpix.RhpDGGS, bound orb.Bound, targetRe
 		return MergeRanges128(append(r1, r2...)), nil
 	}
 
-	poly := orb.Polygon{
-		orb.Ring{
-			bound.Min,
-			{bound.Max.X(), bound.Min.Y()},
-			bound.Max,
-			{bound.Min.X(), bound.Max.Y()},
-			bound.Min,
-		},
-	}
-
-	compacted, err := STACGeometryToTileDBRangesTopDown128(d, poly, targetRes)
-	if err != nil {
-		return nil, fmt.Errorf("failed 128-bit bounding box decomposition: %w", err)
-	}
-
-	if len(compacted) == 0 {
-		return nil, nil
-	}
-
-	ranges := make([]Uint128Range, 0, len(compacted))
-	for _, c := range compacted {
-		minCell, maxCell := c.SubtreeRange(targetRes)
-		ranges = append(ranges, NewUint128Range(minCell, maxCell))
-	}
-
-	return MergeRanges128(ranges), nil
+	poly := bound.ToPolygon()
+	return STACGeometryToTileDBRanges128(d, *geojson.NewGeometry(poly), targetRes)
 }
 
 // KRingToTileDBRanges calculates the K-Ring neighbours around an origin cell at resolution R
