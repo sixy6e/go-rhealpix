@@ -85,7 +85,7 @@ func TestBoundingBoxToTileDBRanges64_Integration(t *testing.T) {
 
 func TestBoundingBoxToTileDBRanges128_Integration(t *testing.T) {
 	el := rhealpix.NewWGS84()
-	targetRes := uint8(20)
+	targetRes := uint8(15)
 	d := rhealpix.NewRhpDGGS(
 		rhealpix.WithEllipsoid(el),
 		rhealpix.WithNSide(3),
