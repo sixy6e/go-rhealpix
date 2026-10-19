@@ -341,3 +341,28 @@ func densifyPolygon(poly orb.Polygon, maxStepDeg float64) orb.Polygon {
 	}
 	return densified
 }
+
+// DensifyWGS84Ring inserts intermediate sample points along WGS84 ring edges
+// so non-linear polar cap projections preserve curved boundary shapes and quadrant seams.
+func DensifyWGS84Ring(ring orb.Ring, pointsPerSegment int) orb.Ring {
+	if len(ring) < 2 || pointsPerSegment <= 1 {
+		return ring
+	}
+
+	densified := make(orb.Ring, 0, (len(ring)-1)*pointsPerSegment+1)
+
+	for i := 0; i < len(ring)-1; i++ {
+		p1 := ring[i]
+		p2 := ring[i+1]
+
+		for s := 0; s < pointsPerSegment; s++ {
+			t := float64(s) / float64(pointsPerSegment)
+			x := p1[0] + t*(p2[0]-p1[0])
+			y := p1[1] + t*(p2[1]-p1[1])
+			densified = append(densified, orb.Point{x, y})
+		}
+	}
+
+	densified = append(densified, ring[len(ring)-1])
+	return densified
+}
