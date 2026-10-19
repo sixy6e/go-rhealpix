@@ -16,15 +16,19 @@ import (
 	"github.com/sixy6e/go-rhealpix/rhealpixorb"
 )
 
+// Set saveGeoJSONDisk to true when debugging to write GeoJSON files to disk.
+const saveGeoJSONDisk = false
+
 type FixtureTestCase struct {
-	Name      string
-	Center    orb.Point
-	WithHole  bool
-	TargetRes uint8
+	Name              string
+	Centre            orb.Point
+	WithHole          bool
+	TargetRes         uint8
+	ExpectedCellCount int
 }
 
 // MakeSyntheticS2Footprint creates a synthetic 100km x 100km WGS84 polygon
-// centreed at (centreLon, centreLat), with optional interior hole.
+// centred at (centreLon, centreLat), with optional interior hole.
 func MakeSyntheticS2Footprint(centreLon, centreLat float64, withHole bool) orb.Polygon {
 	halfLatSpan := 0.45 // ~50 km in latitude
 
@@ -72,47 +76,47 @@ func GetSyntheticTestMatrix() []FixtureTestCase {
 
 	return []FixtureTestCase{
 		// --- Pure In-Facet Granules (6 Cases) ---
-		{Name: "01_Facet_N_North_Cap", Center: orb.Point{0.0, 65.0}},
-		{Name: "02_Facet_O_Equatorial_West", Center: orb.Point{-135.0, 0.0}},
-		{Name: "03_Facet_P_Equatorial_MidWest", Center: orb.Point{-45.0, 0.0}},
-		{Name: "04_Facet_Q_Equatorial_MidEast", Center: orb.Point{45.0, 0.0}},
-		{Name: "05_Facet_R_Equatorial_East", Center: orb.Point{135.0, 0.0}},
-		{Name: "06_Facet_S_South_Cap", Center: orb.Point{0.0, -65.0}},
+		{Name: "01_Facet_N_North_Cap", Centre: orb.Point{0.0, 65.0}, ExpectedCellCount: 156837},
+		{Name: "02_Facet_O_Equatorial_West", Centre: orb.Point{-135.0, 0.0}, ExpectedCellCount: 44627},
+		{Name: "03_Facet_P_Equatorial_MidWest", Centre: orb.Point{-45.0, 0.0}, ExpectedCellCount: 44627},
+		{Name: "04_Facet_Q_Equatorial_MidEast", Centre: orb.Point{45.0, 0.0}, ExpectedCellCount: 44627},
+		{Name: "05_Facet_R_Equatorial_East", Centre: orb.Point{135.0, 0.0}, ExpectedCellCount: 44627},
+		{Name: "06_Facet_S_South_Cap", Centre: orb.Point{0.0, -65.0}, ExpectedCellCount: 156832},
 
 		// --- Equatorial-Polar Cap Straddles (8 Cases) ---
-		{Name: "07_Straddle_O_N", Center: orb.Point{-135.0, capLat}},
-		{Name: "08_Straddle_P_N", Center: orb.Point{-45.0, capLat}},
-		{Name: "09_Straddle_Q_N", Center: orb.Point{45.0, capLat}},
-		{Name: "10_Straddle_R_N", Center: orb.Point{135.0, capLat}},
-		{Name: "11_Straddle_O_S", Center: orb.Point{-135.0, -capLat}},
-		{Name: "12_Straddle_P_S", Center: orb.Point{-45.0, -capLat}},
-		{Name: "13_Straddle_Q_S", Center: orb.Point{45.0, -capLat}},
-		{Name: "14_Straddle_R_S_55GDP_Style", Center: orb.Point{146.5, -capLat}},
+		{Name: "07_Straddle_O_N", Centre: orb.Point{-135.0, capLat}, ExpectedCellCount: 144987},
+		{Name: "08_Straddle_P_N", Centre: orb.Point{-45.0, capLat}, ExpectedCellCount: 144987},
+		{Name: "09_Straddle_Q_N", Centre: orb.Point{45.0, capLat}, ExpectedCellCount: 144987},
+		{Name: "10_Straddle_R_N", Centre: orb.Point{135.0, capLat}, ExpectedCellCount: 144987},
+		{Name: "11_Straddle_O_S", Centre: orb.Point{-135.0, -capLat}, ExpectedCellCount: 144987},
+		{Name: "12_Straddle_P_S", Centre: orb.Point{-45.0, -capLat}, ExpectedCellCount: 144987},
+		{Name: "13_Straddle_Q_S", Centre: orb.Point{45.0, -capLat}, ExpectedCellCount: 144987},
+		{Name: "14_Straddle_R_S_55GDP_Style", Centre: orb.Point{146.5, -capLat}, ExpectedCellCount: 116629},
 
 		// --- Equatorial Inter-Facet Longitude Seams (4 Cases) ---
-		{Name: "15_Seam_O_P_Minus90", Center: orb.Point{-90.0, 0.0}},
-		{Name: "16_Seam_P_Q_PrimeMeridian", Center: orb.Point{0.0, 0.0}},
-		{Name: "17_Seam_Q_R_Plus90", Center: orb.Point{90.0, 0.0}},
-		{Name: "18_Seam_R_O_AntiMeridian", Center: orb.Point{180.0, 0.0}},
+		{Name: "15_Seam_O_P_Minus90", Centre: orb.Point{-90.0, 0.0}, ExpectedCellCount: 85896},
+		{Name: "16_Seam_P_Q_PrimeMeridian", Centre: orb.Point{0.0, 0.0}, ExpectedCellCount: 85896},
+		{Name: "17_Seam_Q_R_Plus90", Centre: orb.Point{90.0, 0.0}, ExpectedCellCount: 85896},
+		{Name: "18_Seam_R_O_AntiMeridian", Centre: orb.Point{180.0, 0.0}, ExpectedCellCount: 85896},
 
 		// --- 3-Facet Tri-Junction Corners (8 Cases) ---
-		{Name: "19_Corner_OP_N", Center: orb.Point{-90.0, capLat}},
-		{Name: "20_Corner_PQ_N", Center: orb.Point{0.0, capLat}},
-		{Name: "21_Corner_QR_N", Center: orb.Point{90.0, capLat}},
-		{Name: "22_Corner_RO_N", Center: orb.Point{180.0, capLat}},
-		{Name: "23_Corner_OP_S", Center: orb.Point{-90.0, -capLat}},
-		{Name: "24_Corner_PQ_S", Center: orb.Point{0.0, -capLat}},
-		{Name: "25_Corner_QR_S", Center: orb.Point{90.0, -capLat}},
-		{Name: "26_Corner_RO_S", Center: orb.Point{180.0, -capLat}},
+		{Name: "19_Corner_OP_N", Centre: orb.Point{-90.0, capLat}, ExpectedCellCount: 132947},
+		{Name: "20_Corner_PQ_N", Centre: orb.Point{0.0, capLat}, ExpectedCellCount: 132947},
+		{Name: "21_Corner_QR_N", Centre: orb.Point{90.0, capLat}, ExpectedCellCount: 132947},
+		{Name: "22_Corner_RO_N", Centre: orb.Point{180.0, capLat}, ExpectedCellCount: 132947},
+		{Name: "23_Corner_OP_S", Centre: orb.Point{-90.0, -capLat}, ExpectedCellCount: 132947},
+		{Name: "24_Corner_PQ_S", Centre: orb.Point{0.0, -capLat}, ExpectedCellCount: 132947},
+		{Name: "25_Corner_QR_S", Centre: orb.Point{90.0, -capLat}, ExpectedCellCount: 132947},
+		{Name: "26_Corner_RO_S", Centre: orb.Point{180.0, -capLat}, ExpectedCellCount: 132947},
 
 		// --- Quad Points & Extremes (3 Cases) ---
-		{Name: "27_QuadPoint_North_West", Center: orb.Point{-180.0, capLat}},
-		{Name: "28_QuadPoint_South_East", Center: orb.Point{180.0, -capLat}},
-		{Name: "29_Unwrapped_AntiMeridian_Cross", Center: orb.Point{180.05, 10.0}},
+		{Name: "27_QuadPoint_North_West", Centre: orb.Point{-180.0, capLat}, ExpectedCellCount: 132947},
+		{Name: "28_QuadPoint_South_East", Centre: orb.Point{180.0, -capLat}, ExpectedCellCount: 132947},
+		{Name: "29_Unwrapped_AntiMeridian_Cross", Centre: orb.Point{180.05, 10.0}, ExpectedCellCount: 120530},
 
 		// --- Singularities & Hole Topology (2 Cases) ---
-		{Name: "30_North_Pole_Enclosure", Center: orb.Point{0.0, 89.6}},
-		{Name: "31_Seam_R_S_With_Hole", Center: orb.Point{146.5, -capLat}, WithHole: true},
+		{Name: "30_North_Pole_Enclosure", Centre: orb.Point{0.0, 89.6}, ExpectedCellCount: 109409},
+		{Name: "31_Seam_R_S_With_Hole", Centre: orb.Point{146.5, -capLat}, WithHole: true, ExpectedCellCount: 137006},
 	}
 }
 
@@ -146,7 +150,7 @@ func InspectCellWKT(d *rhealpix.RhpDGGS, cellIDStr string) {
 		fmt.Printf("  Pt %d: x = %.14f, y = %.14f\n", i, pt[0]*ra, pt[1]*ra)
 	}
 
-	fmt.Println("Cell Shape")
+	fmt.Println("Cell Shape:")
 	fmt.Println(rhealpix.EllipsoidalCellShape(d, cellID))
 
 	// CellToPolygon formatted output
@@ -157,8 +161,7 @@ func InspectCellWKT(d *rhealpix.RhpDGGS, cellIDStr string) {
 	}
 
 	fmt.Println("CellToPolygon WKT:")
-	str := wkt.MarshalString(poly)
-	fmt.Println(str)
+	fmt.Println(wkt.MarshalString(poly))
 }
 
 func ExportComparisonGeoJSON() error {
@@ -242,8 +245,10 @@ func TestGenerateAndExportSyntheticFixtures(t *testing.T) {
 	tests := GetSyntheticTestMatrix()
 
 	outputDir := filepath.Join(".", "test_output_geojson")
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		t.Fatalf("failed creating output directory: %v", err)
+	if saveGeoJSONDisk {
+		if err := os.MkdirAll(outputDir, 0755); err != nil {
+			t.Fatalf("failed creating output directory: %v", err)
+		}
 	}
 
 	targetRes := uint8(13)
@@ -255,51 +260,23 @@ func TestGenerateAndExportSyntheticFixtures(t *testing.T) {
 		rhealpix.WithMaxResolution(targetRes),
 	)
 
-	// c, _ := rhealpix.ParseCellID64("R55555")
-	// cvert := rhealpix.CellPlanarVertices(d, c)
-	// wgs84verts, _ := rhealpix.GeographicVertices(d, c)
-	// fmt.Printf("R5555 planar vertices: %v\n", cvert)
-	// fmt.Printf("R5555 geographic vertices: %v\n", wgs84verts)
-
-	// InspectCellWKT(d, "N4444444444482")
-	// ExportComparisonGeoJSON()
-	// InspectCellWKT(d, "N44440220")
-	// InspectCellWKT(d, "N44442")
-	// InspectDartCell(d, "N44442")
-
 	for _, tc := range tests {
 		t.Run(tc.Name, func(t *testing.T) {
-			inputPoly := MakeSyntheticS2Footprint(tc.Center.X(), tc.Center.Y(), tc.WithHole)
-			// ================ Unwrap Logging =====================
-			// unwrapped := rhealpixorb.UnwrapPolygon(inputPoly, 0.0)
-			// for i, pt := range unwrapped[0] {
-			// 	fmt.Printf("Vertex %d: Lon = %f, Lat = %f\n", i, pt.X(), pt.Y())
-			// }
-
-			// export synthetic input geometry
-			inputFC := geojson.NewFeatureCollection()
-			inputFeat := geojson.NewFeature(inputPoly)
-			inputFeat.Properties["test_name"] = tc.Name
-			inputFeat.Properties["has_hole"] = tc.WithHole
-			inputFC.Append(inputFeat)
+			inputPoly := MakeSyntheticS2Footprint(tc.Centre.X(), tc.Centre.Y(), tc.WithHole)
 
 			inputPath := filepath.Join(outputDir, fmt.Sprintf("%s_input.geojson", tc.Name))
-			if err := writeGeoJSONFile(inputPath, inputFC); err != nil {
-				t.Fatalf("failed exporting input GeoJSON for %s: %v", tc.Name, err)
+			if saveGeoJSONDisk {
+				// export synthetic input geometry
+				inputFC := geojson.NewFeatureCollection()
+				inputFeat := geojson.NewFeature(inputPoly)
+				inputFeat.Properties["test_name"] = tc.Name
+				inputFeat.Properties["has_hole"] = tc.WithHole
+				inputFC.Append(inputFeat)
+
+				if err := writeGeoJSONFile(inputPath, inputFC); err != nil {
+					t.Fatalf("failed exporting input GeoJSON for %s: %v", tc.Name, err)
+				}
 			}
-
-			// clip/partition geometry into facet sub-geometries
-			// results, err := rhealpixorb.ClipGeometryToFacets(d, inputFeat.Geometry)
-			// if err != nil {
-			// 	t.Fatalf("ClipGeometryToFacets failed: %v", err)
-			// }
-
-			// ==================== BOUNDS LOGGING ====================
-			// for i, res := range results {
-			// 	bounds := res.Geometry.Bound()
-			// 	t.Logf("Piece %d -> Facet %d | Bounds: Lon [%.4f, %.4f], Lat [%.4f, %.4f]",
-			// 		i, res.FacetID, bounds.Min.X(), bounds.Max.X(), bounds.Min.Y(), bounds.Max.Y())
-			// }
 
 			// run top-down planar decomposition & compaction
 			gjsn := geojson.NewGeometry(inputPoly)
@@ -312,26 +289,27 @@ func TestGenerateAndExportSyntheticFixtures(t *testing.T) {
 				t.Fatalf("FAIL: 0 compacted cells produced for valid polygon %s", tc.Name)
 			}
 
-			counts := make(map[uint8]uint64)
-			for _, c := range compactedCells {
-				counts[c.Facet()] += 1
-			}
-			fmt.Println("Facet counts: ", counts)
-
-			// export compacted cell geometries
 			cellsPath := filepath.Join(outputDir, fmt.Sprintf("%s_cells.geojson", tc.Name))
-			if err := rhealpixorb.ExportCellsToGeoJSON(d, compactedCells, cellsPath, 16); err != nil {
-				t.Fatalf("failed exporting cell GeoJSON for %s: %v", tc.Name, err)
+			if saveGeoJSONDisk {
+				// export compacted cell geometries
+				if err := rhealpixorb.ExportCellsToGeoJSON(d, compactedCells, cellsPath, 0); err != nil {
+					t.Fatalf("failed exporting cell GeoJSON for %s: %v", tc.Name, err)
+				}
 			}
 
-			// assert reasonableness bounds
-			// 500000 -> just a guesstimate
-			if len(compactedCells) > 500000 {
-				t.Errorf("Cell explosion detected in %s: got %d cells", tc.Name, len(compactedCells))
+			// cell count assertion
+			if tc.ExpectedCellCount > 0 && len(compactedCells) != tc.ExpectedCellCount {
+				t.Errorf("%s cell count mismatch: got %d cells, want %d",
+					tc.Name, len(compactedCells), tc.ExpectedCellCount)
 			}
 
-			t.Logf("EXPORTED: %-35s -> Input: %s | Cells: %s (%d cells)",
-				tc.Name, filepath.Base(inputPath), filepath.Base(cellsPath), len(compactedCells))
+			if saveGeoJSONDisk {
+				fmt.Printf("EXPORTED: %-35s -> Input: %s | Cells: %s (%d cells)\n",
+					tc.Name, filepath.Base(inputPath), filepath.Base(cellsPath), len(compactedCells))
+			} else {
+				fmt.Printf("PASSED: %-35s -> %d compacted cells\n", tc.Name, len(compactedCells))
+			}
+			os.Stdout.Sync()
 		})
 	}
 }
