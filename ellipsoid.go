@@ -180,6 +180,54 @@ func (el *Ellipsoid) AuthLatDirect(phi float64) float64 {
 	return math.Asin(sinBeta)
 }
 
+// AuthLatInverse converts authalic latitude (beta in radians) back to geodetic latitude (phi in radians).
+// Uses a direct formula which isn't as accurate as the power series coefficients method.
+func (el *Ellipsoid) AuthLatInverseDirect(beta float64) float64 {
+	sinBeta := math.Sin(beta)
+
+	if sinBeta >= 0.99999999 {
+		return HalfPi
+	}
+	if sinBeta <= -0.99999999 {
+		return -HalfPi
+	}
+
+	if el.E == 0 {
+		return beta
+	}
+
+	// target authalic q value
+	qTarget := sinBeta * el.QBar
+
+	// Newton-Raphson solver for phi
+	phi := beta // initial guess
+	for i := 0; i < 5; i++ {
+		sinPhi := math.Sin(phi)
+		cosPhi := math.Cos(phi)
+		sin2 := sinPhi * sinPhi
+
+		if math.Abs(cosPhi) < 1e-12 {
+			break
+		}
+
+		// q(phi)
+		q := el.OneMinusE2 * (sinPhi/(1.0-el.E2*sin2) - (1.0/(2.0*el.E))*math.Log((1.0-el.E*sinPhi)/(1.0+el.E*sinPhi)))
+
+		// dq/dphi = 2 * (1 - e^2) * cos(phi) / (1 - e^2 * sin^2(phi))^2
+		denom := 1.0 - el.E2*sin2
+		dqdphi := 2.0 * el.OneMinusE2 * cosPhi / (denom * denom)
+
+		diff := q - qTarget
+		if math.Abs(diff) < 1e-14 {
+			break
+		}
+
+		phi -= diff / dqdphi
+	}
+
+	return phi
+}
+
 func (e *Ellipsoid) GeodeticToAuthalic(phi float64) float64 {
 	return e.AuthLat(phi)
 }
